@@ -94,6 +94,13 @@ if [[ -n "${SPACE_ID:-}" ]]; then
   export WEBUI_URL="${SPACE_HOST}"
 fi
 
+# ── Greg function seeder ─────────────────────────────────────────────────────
+# Register/update Greg's pipe, filter, and tools in the database.
+# Idempotent — safe to run on every boot. Source code lives in greg/ directory.
+
+echo "Seeding Greg functions..."
+"$PYTHON_CMD" -m open_webui.greg_seed 2>&1 || echo "Greg seed skipped (first boot or DB not ready)"
+
 # ── Launch uvicorn ───────────────────────────────────────────────────────────
 
 PYTHON_CMD=$(command -v python3 || command -v python)
