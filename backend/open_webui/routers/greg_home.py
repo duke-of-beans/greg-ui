@@ -59,9 +59,10 @@ async def get_greeting(form_data: GreetingRequest, user=Depends(get_verified_use
 
 
 # Generic CORTEX MCP proxy for the rest of the /home page (desk metrics,
-# while-away, murmuring, journal). Allowlisted to the specific tools this
-# page needs — this is not an open CORTEX RPC gateway.
-ALLOWED_TOOLS = {'ask_greg', 'recall', 'gaps_queue', 'brain_remember', 'rosetta_ingest'}
+# while-away, murmuring, journal) and the /face kiosk page (affect,
+# ask_greg). Allowlisted to the specific tools these pages need — this is
+# not an open CORTEX RPC gateway.
+ALLOWED_TOOLS = {'ask_greg', 'recall', 'gaps_queue', 'brain_remember', 'rosetta_ingest', 'affect'}
 
 
 class McpCallRequest(BaseModel):
