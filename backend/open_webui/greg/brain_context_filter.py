@@ -76,7 +76,18 @@ class Filter:
         body: dict,
         __user__: Optional[dict] = None,
     ) -> dict:
-        """Capture David's messages to ROSETTA on every response."""
+        """Capture David's messages to ROSETTA on every response.
+
+        Skipped for pipe models (cortex_pipe.*, greg-*): cortex_pipe.py
+        captures David's message itself at the start of its own pipe(),
+        because Open WebUI does not reliably call outlet() for pipe-model
+        responses. Capturing here too would double-ingest into ROSETTA for
+        every HEARTH chat turn.
+        """
+        model = body.get("model", "")
+        if any(model.startswith(prefix) for prefix in PIPE_MODEL_PREFIXES):
+            return body
+
         # Only capture admin (David) messages, not Greg's
         if __user__ and __user__.get("role") == "admin":
             messages = body.get("messages", [])

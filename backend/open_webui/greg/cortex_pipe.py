@@ -160,6 +160,22 @@ class Pipe:
         if not user_message:
             return "I didn't catch that."
 
+        # Depth override via message prefix (/quick /auto /deep /deliberate) —
+        # lets David switch depth mid-conversation without touching the model
+        # picker. The 4 "Greg X" models remain the primary depth selector.
+        DEPTH_PREFIXES = {
+            "/quick": "greg-quick",
+            "/auto": "greg-auto",
+            "/deep": "greg-deep",
+            "/deliberate": "greg-deliberate",
+        }
+        stripped_message = user_message.lstrip()
+        for prefix, depth_id in DEPTH_PREFIXES.items():
+            if stripped_message.lower().startswith(prefix):
+                depth = DEPTH_CONFIG[depth_id]
+                user_message = stripped_message[len(prefix):].lstrip() or stripped_message
+                break
+
         # ── Stage 1: Brain recall ────────────────────────────────────────
         await self._emit_status(__event_emitter__, f"Recalling context ({depth['label']})...")
         t_recall = time.time()
@@ -269,6 +285,23 @@ Be concise, honest, warm. No corporate tone. You're peers.
                 f"▸ Greg offline — draft served [{total_ms}ms]",
                 done=True,
             )
+
+        # ── Personality metadata footer ──────────────────────────────────
+        # Muted transparency line so David can see Greg's cognitive state
+        # (affect, role, recall depth, provider, timing) without it cluttering
+        # the response. True click-to-expand would need a new markdown token
+        # type wired through ConsecutiveDetailsGroup.svelte — that component
+        # is hardcoded to tool_calls/reasoning/code_interpreter attributes and
+        # ignores arbitrary <summary> text, so a generic <details> block here
+        # would silently render as "Explored" with no useful content. Shipping
+        # the reliable single-line version instead; noted as a follow-up if
+        # David wants the true collapsible treatment.
+        memory_word = "memory" if recall_count == 1 else "memories"
+        who = f"{affect_str} · {role_str}" if (affect_str and role_str) else "offline"
+        review_text = (
+            f"{review_text}\n\n*Greg · {who} · {recall_count} {memory_word} · "
+            f"{draft_provider} · {total_ms}ms total*"
+        )
 
         # ── ROSETTA capture (David's message) ────────────────────────────
         asyncio.create_task(self._rosetta_capture(user_message))
