@@ -2,8 +2,8 @@
 # Greg UI deploy script for Sentinel
 # Usage: ./scripts/deploy-sentinel.sh
 #
-# Pulls latest from github, rebuilds Docker image, restarts container.
-# Data volume persists across rebuilds — no conversation loss.
+# Pulls latest pre-built image from GHCR (built by GitHub Actions),
+# restarts container. Data volume persists — no conversation loss.
 # Run from the greg-ui repo root on Sentinel.
 
 set -euo pipefail
@@ -14,28 +14,27 @@ REPO_DIR="$(dirname "$SCRIPT_DIR")"
 cd "$REPO_DIR"
 
 echo "=== Greg UI Deploy ==="
-echo "Repo: $(pwd)"
 echo "Time: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
-# Pull latest
+# Pull latest compose config
 echo ""
-echo "--- Pulling latest ---"
+echo "--- Pulling repo ---"
 git fetch origin main
 git reset --hard origin/main
 
-# Build and restart
+# Pull pre-built image from GHCR
 echo ""
-echo "--- Building Docker image ---"
-docker compose -f docker-compose.greg.yaml build --no-cache
+echo "--- Pulling image from GHCR ---"
+docker pull ghcr.io/duke-of-beans/greg-ui:latest
 
+# Restart
 echo ""
 echo "--- Restarting container ---"
-docker compose -f docker-compose.greg.yaml down
+docker compose -f docker-compose.greg.yaml down 2>/dev/null || true
 docker compose -f docker-compose.greg.yaml up -d
 
 echo ""
 echo "--- Waiting for health ---"
-sleep 5
 for i in $(seq 1 12); do
     if curl -sf http://localhost:3000/health > /dev/null 2>&1; then
         echo "Greg UI is healthy."
