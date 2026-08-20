@@ -20,7 +20,7 @@ services:
     ports:
       - "3000:8080"
     volumes:
-      - greg-data:/app/backend/data
+      - open-webui:/app/backend/data
     environment:
       - WEBUI_SECRET_KEY=${WEBUI_SECRET_KEY:-}
       - ENABLE_PLUGINS=true
@@ -36,5 +36,6 @@ services:
     memswap_limit: 1536m
 
 volumes:
-  greg-data:
-    name: greg-ui-data
+  open-webui:
+    external: true
+    name: open-webui
