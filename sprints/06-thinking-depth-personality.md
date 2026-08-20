@@ -72,13 +72,16 @@ the pipe function before processing.
 
 ## CORTEX MCP Details
 Endpoint: https://cortex-production-d0d7.up.railway.app/mcp
-Auth: Bearer yevDScM_JKyl4zNl8js_ZJg_8oZRxe4SWcSvMcMRZF4
+Auth: Bearer token — server-side only, from the CORTEX_KEY env var (see
+  backend/open_webui/greg_cortex_client.py). Never hardcode it in source;
+  this repo is public. cortex_pipe.py and the other greg/*.py Functions
+  already read it this way — reuse that, don't duplicate the literal token.
 Tools available: recall, ask_greg, brain_remember, rosetta_ingest,
   gaps_list, gaps_queue, beliefs_query, affect, federation_health
 
 CORTEX AI Complete endpoint (for drafting):
 POST https://cortex-production-d0d7.up.railway.app/v1/ai/complete
-Auth: same Bearer token
+Auth: same Bearer token, same env-var-only rule as above
 Body: { messages: [...], ring: 3, max_tokens: 2000, temperature: 0.7 }
 
 ## Constraints

@@ -16,9 +16,15 @@ Four depth models:
   Greg Deliberate — 20 memories, formal, multi-model
 
 Updated 2026-08-20: AI Gateway architecture, enhanced thinking display
+
+Valve defaults read from CORTEX_URL / CORTEX_KEY environment variables —
+never hardcoded here, since this repo is public. Set them in the deploy
+environment (see .env.example, docker-compose.greg.yaml); admins can
+still override per-instance from the Valves UI.
 """
 
 import json
+import os
 import time
 import asyncio
 from typing import Optional, Callable, Awaitable, Generator
@@ -36,12 +42,14 @@ DEPTH_CONFIG = {
 class Pipe:
     class Valves(BaseModel):
         CORTEX_URL: str = Field(
-            default="https://cortex-production-d0d7.up.railway.app",
+            default_factory=lambda: os.getenv(
+                "CORTEX_URL", "https://cortex-production-d0d7.up.railway.app"
+            ),
             description="CORTEX Railway URL"
         )
         CORTEX_KEY: str = Field(
-            default="yevDScM_JKyl4zNl8js_ZJg_8oZRxe4SWcSvMcMRZF4",
-            description="CORTEX Bearer token"
+            default_factory=lambda: os.getenv("CORTEX_KEY", ""),
+            description="CORTEX Bearer token (set via CORTEX_KEY env var)"
         )
 
     def __init__(self):

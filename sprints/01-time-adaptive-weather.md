@@ -49,10 +49,8 @@ Weather already calls Open-Meteo. Enhance the display:
 
 ### 4. Contextual Greeting (DES-07, DES-49)
 Replace the static greeting templates with a CORTEX-generated greeting.
-On page load, call CORTEX MCP endpoint:
+On page load, call CORTEX's `ask_greg` tool:
 ```
-POST https://cortex-production-d0d7.up.railway.app/mcp
-Authorization: Bearer yevDScM_JKyl4zNl8js_ZJg_8oZRxe4SWcSvMcMRZF4
 Body: { method: "tools/call", params: { name: "ask_greg", arguments: {
   intent: "Generate a brief greeting for David. Time: {timeMode}, weather: {temp}°F {conditions}. Be natural, not robotic. One sentence.",
   register: "casual"
@@ -61,9 +59,29 @@ Body: { method: "tools/call", params: { name: "ask_greg", arguments: {
 Fall back to static templates if CORTEX is unreachable.
 Cache the greeting for 15 minutes (don't re-generate on every page load).
 
+**Do not call CORTEX directly from this Svelte page with a hardcoded bearer
+token** — this repo is public, and a token embedded in a `.svelte` file
+ships in the JS bundle and git history for anyone to read. Route the call
+through the Open WebUI backend instead: POST to `/api/v1/greg/greeting`
+(added in `backend/open_webui/routers/greg_home.py`), which holds
+`CORTEX_URL`/`CORTEX_KEY` as server-side env vars (see
+`greg_cortex_client.py`) and forwards to CORTEX itself. Same pattern the
+`cortex_pipe` chat Function already uses for its own Valves.
+
 ## Constraints
 - This is a Svelte component in an Open WebUI fork. No React.
 - No npm install — only use what's already in the project
 - Keep the breathing dot and journal input exactly as they are
 - Test by running `npm run dev` locally if possible, otherwise verify syntax
 - Commit to duke-of-beans/greg-ui main branch when done
+
+## Status: done (2026-08-20)
+Implemented via Cowork, merged against the Layout D calm-tech rewrite that
+landed in this file concurrently (see sprint 02). Time modes, CSS time
+warmth, weather sunrise/sunset/daylight-remaining, and the CORTEX greeting
+are all in; the greeting, Greg's thought/murmuring, while-away, desk
+metrics, and journal calls all route through the backend proxy above
+instead of hitting CORTEX from the browser. The CORTEX token that was
+already live in this file's git history (and in `cortex_pipe.py`,
+`brain_context_filter.py`, `lifelog_tool.py`, and this sprint doc itself)
+should be rotated — it was public before this fix landed.

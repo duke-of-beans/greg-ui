@@ -6,9 +6,13 @@ Inlet:  Skips brain.db recall for pipe models (CORTEX pipe handles its own recal
 Outlet: Captures David's messages to ROSETTA for voice corpus + brain.db ingestion
 
 Updated 2026-08-20
+
+Valve defaults read from CORTEX_URL / CORTEX_KEY environment variables —
+never hardcoded here, since this repo is public.
 """
 
 import json
+import os
 import asyncio
 from typing import Optional, Callable, Awaitable
 from pydantic import BaseModel, Field
@@ -20,12 +24,14 @@ PIPE_MODEL_PREFIXES = ["cortex_pipe.", "greg-"]
 class Filter:
     class Valves(BaseModel):
         CORTEX_URL: str = Field(
-            default="https://cortex-production-d0d7.up.railway.app",
+            default_factory=lambda: os.getenv(
+                "CORTEX_URL", "https://cortex-production-d0d7.up.railway.app"
+            ),
             description="CORTEX Railway URL"
         )
         CORTEX_KEY: str = Field(
-            default="yevDScM_JKyl4zNl8js_ZJg_8oZRxe4SWcSvMcMRZF4",
-            description="CORTEX Bearer token"
+            default_factory=lambda: os.getenv("CORTEX_KEY", ""),
+            description="CORTEX Bearer token (set via CORTEX_KEY env var)"
         )
 
     def __init__(self):

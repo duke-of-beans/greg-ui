@@ -1,28 +1,25 @@
 <script lang="ts">
 	import { onMount, onDestroy } from 'svelte';
+	import { WEBUI_API_BASE_URL } from '$lib/constants';
 
 	// ============================================================
-	// CORTEX MCP client
+	// CORTEX MCP client — proxied through the Open WebUI backend
+	// (/api/v1/greg/mcp, /api/v1/greg/greeting). The CORTEX bearer
+	// token lives server-side only (see greg_cortex_client.py) —
+	// this page never sees it and it never ships in the JS bundle.
 	// ============================================================
-	const CORTEX_URL = 'https://cortex-production-d0d7.up.railway.app/mcp';
-	const CORTEX_KEY = 'yevDScM_JKyl4zNl8js_ZJg_8oZRxe4SWcSvMcMRZF4';
-
 	async function cortexCall(tool: string, args: Record<string, unknown> = {}) {
-		const res = await fetch(CORTEX_URL, {
+		const res = await fetch(`${WEBUI_API_BASE_URL}/greg/mcp`, {
 			method: 'POST',
 			headers: {
 				'Content-Type': 'application/json',
-				Authorization: `Bearer ${CORTEX_KEY}`
+				authorization: `Bearer ${localStorage.token}`
 			},
-			body: JSON.stringify({
-				jsonrpc: '2.0',
-				id: Date.now(),
-				method: 'tools/call',
-				params: { name: tool, arguments: args }
-			})
+			body: JSON.stringify({ tool, arguments: args })
 		});
+		if (!res.ok) throw new Error(`CORTEX proxy error ${res.status}`);
 		const data = await res.json();
-		return data?.result?.content?.[0]?.text;
+		return data?.text as string | undefined;
 	}
 
 	function safeParse(text: string | undefined) {
@@ -53,22 +50,57 @@
 	}
 
 	// ============================================================
-	// Time & contextual greeting (Sprint 01)
+	// Time modes, contextual greeting, and time warmth (Sprint 01)
 	// ============================================================
+	type TimeMode = 'morning' | 'midday' | 'evening' | 'night';
+
 	let currentTime = '';
 	let currentDate = '';
 	let greeting = '';
-	let timeMode: 'morning' | 'midday' | 'evening' | 'night' = 'midday';
+	let timeMode: TimeMode = 'midday';
+	let timeModeInitialized = false;
 
 	let weather = {
 		temp: '--',
 		condition: '',
-		sunsetIn: '',
+		sunrise: '',
+		sunset: '',
+		daylightRemaining: '',
 		loaded: false
 	};
 
 	let breathePhase = true;
 	let timeInterval: ReturnType<typeof setInterval>;
+	let weatherInterval: ReturnType<typeof setInterval>;
+
+	const FALLBACK_GREETINGS: Record<TimeMode, string> = {
+		morning: "Good morning, David — here's what happened while you were away.",
+		midday: 'Hey.',
+		evening: 'Anything on your mind?',
+		night: "It's late."
+	};
+
+	// Which parts of Layout D are visible per mode. morning/evening stay full
+	// density; midday goes glance-only; night reduces to the greeting/weather
+	// block, breathing dot, and journal bar — sidebar, Prometheus/Modules, and
+	// the top-bar portal links all hide.
+	$: showSection = {
+		sidebar: timeMode !== 'night',
+		modules: timeMode === 'morning' || timeMode === 'evening',
+		portalLinks: timeMode !== 'night'
+	};
+
+	// Time warmth (DES-06): drives --time-warmth (hue)/--time-sat/--time-light
+	// on the container. Morning shifts warm (~30°), midday stays neutral,
+	// evening stays slightly warm, night goes cool blue-black. Light theme
+	// overrides --bg directly regardless (see .hearth.light).
+	const TIME_WARMTH: Record<TimeMode, { h: number; s: number; l: number }> = {
+		morning: { h: 30, s: 24, l: 8 },
+		midday: { h: 220, s: 4, l: 8 },
+		evening: { h: 26, s: 14, l: 8 },
+		night: { h: 222, s: 28, l: 4 }
+	};
+	$: warmth = TIME_WARMTH[timeMode];
 
 	function updateTime() {
 		const now = new Date();
@@ -86,28 +118,88 @@
 			day: 'numeric'
 		});
 
-		if (hour >= 6 && hour < 10) {
-			timeMode = 'morning';
-			greeting = 'Good morning, David.';
-		} else if (hour >= 10 && hour < 16) {
-			timeMode = 'midday';
-			greeting = 'Hey.';
-		} else if (hour >= 16 && hour < 22) {
-			timeMode = 'evening';
-			greeting = 'Evening.';
-		} else {
-			timeMode = 'night';
-			greeting = "It's late.";
+		let mode: TimeMode;
+		if (hour >= 6 && hour < 10) mode = 'morning';
+		else if (hour >= 10 && hour < 16) mode = 'midday';
+		else if (hour >= 16 && hour < 22) mode = 'evening';
+		else mode = 'night';
+
+		// Static placeholder shows immediately; fetchGreeting() upgrades it.
+		greeting = FALLBACK_GREETINGS[mode];
+
+		if (!timeModeInitialized || mode !== timeMode) {
+			timeModeInitialized = true;
+			timeMode = mode;
+			fetchGreeting(mode);
 		}
 	}
 
+	// --- Contextual greeting (DES-07, DES-49) ---
+	const GREETING_CACHE_KEY = 'greg_greeting_cache';
+	const GREETING_CACHE_MS = 15 * 60 * 1000;
+
+	async function fetchGreeting(mode: TimeMode) {
+		try {
+			const cached = JSON.parse(localStorage.getItem(GREETING_CACHE_KEY) || 'null');
+			if (cached && cached.timeMode === mode && Date.now() - cached.ts < GREETING_CACHE_MS) {
+				greeting = cached.greeting;
+				return;
+			}
+		} catch {
+			// ignore malformed cache
+		}
+
+		try {
+			const res = await fetch(`${WEBUI_API_BASE_URL}/greg/greeting`, {
+				method: 'POST',
+				headers: {
+					'Content-Type': 'application/json',
+					authorization: `Bearer ${localStorage.token}`
+				},
+				body: JSON.stringify({
+					time_mode: mode,
+					temp: weather.loaded ? weather.temp : undefined,
+					condition: weather.loaded ? weather.condition : undefined
+				})
+			});
+			if (!res.ok) throw new Error(`status ${res.status}`);
+			const data = await res.json();
+
+			if (data?.greeting) {
+				greeting = data.greeting;
+				if (!data.fallback) {
+					localStorage.setItem(
+						GREETING_CACHE_KEY,
+						JSON.stringify({ greeting: data.greeting, timeMode: mode, ts: Date.now() })
+					);
+				}
+			}
+		} catch {
+			// keep the static fallback updateTime() already set
+		}
+	}
+
+	// --- Weather (Open-Meteo, free, no key) — DES-34 through DES-37 ---
+	const WEATHER_CACHE_KEY = 'greg_weather_cache';
+	const WEATHER_CACHE_MS = 30 * 60 * 1000;
+
 	async function fetchWeather() {
+		try {
+			const cached = JSON.parse(localStorage.getItem(WEATHER_CACHE_KEY) || 'null');
+			if (cached && Date.now() - cached.ts < WEATHER_CACHE_MS) {
+				weather = cached.weather;
+				return;
+			}
+		} catch {
+			// ignore malformed cache
+		}
+
 		try {
 			const res = await fetch(
 				'https://api.open-meteo.com/v1/forecast?' +
-					'latitude=34.27&longitude=-118.78' +
+					'latitude=34.2694&longitude=-118.7815' +
 					'&current=temperature_2m,weathercode' +
-					'&daily=sunset' +
+					'&daily=sunrise,sunset' +
 					'&temperature_unit=fahrenheit' +
 					'&timezone=America/Los_Angeles'
 			);
@@ -117,23 +209,44 @@
 			const code = data.current.weathercode;
 			const condition = weatherCodeToText(code);
 
-			const sunsetStr = data.daily.sunset[0];
-			const sunset = new Date(sunsetStr);
+			const sunrise = new Date(data.daily.sunrise[0]);
+			const sunset = new Date(data.daily.sunset[0]);
 			const now = new Date();
-			const diffMs = sunset.getTime() - now.getTime();
 
-			let sunsetIn = '';
-			if (diffMs > 0) {
+			const timeFmt = (d: Date) =>
+				d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
+
+			let daylightRemaining = '';
+			if (now < sunrise) {
+				daylightRemaining = 'Before sunrise';
+			} else if (now >= sunset) {
+				daylightRemaining = 'After sunset';
+			} else {
+				const diffMs = sunset.getTime() - now.getTime();
 				const hours = Math.floor(diffMs / 3600000);
 				const mins = Math.floor((diffMs % 3600000) / 60000);
-				sunsetIn = hours > 0 ? `Sunset in ${hours}h ${mins}m` : `Sunset in ${mins}m`;
-			} else {
-				sunsetIn = 'After sunset';
+				daylightRemaining = hours > 0 ? `${hours}h ${mins}m left` : `${mins}m left`;
 			}
 
-			weather = { temp: `${temp}°F`, condition, sunsetIn, loaded: true };
+			weather = {
+				temp: `${temp}°F`,
+				condition,
+				sunrise: timeFmt(sunrise),
+				sunset: timeFmt(sunset),
+				daylightRemaining,
+				loaded: true
+			};
+
+			localStorage.setItem(WEATHER_CACHE_KEY, JSON.stringify({ weather, ts: Date.now() }));
 		} catch {
-			weather = { temp: '--', condition: '', sunsetIn: '', loaded: false };
+			weather = {
+				temp: '--',
+				condition: '',
+				sunrise: '',
+				sunset: '',
+				daylightRemaining: '',
+				loaded: false
+			};
 		}
 	}
 
@@ -199,6 +312,8 @@
 	// Left sidebar — five fixed sections (DES-20: never reorder)
 	// ============================================================
 	type SidebarItem = { id: string; text: string; timestamp?: string };
+	type RecallResult = { id?: string; content?: string; timestamp?: string };
+	type MurmurSeed = { id?: string; content?: string; created_at?: string };
 
 	let sidebarExpanded = {
 		whileAway: false,
@@ -247,7 +362,7 @@
 			const text = await cortexCall('recall', { query, limit: 3 });
 			const parsed = safeParse(text);
 			const results = parsed?.results || [];
-			whileAway = results.slice(0, 3).map((r: any, i: number) => ({
+			whileAway = results.slice(0, 3).map((r: RecallResult, i: number) => ({
 				id: r.id || `while-away-${i}`,
 				text: (r.content || '').slice(0, 140),
 				timestamp: r.timestamp
@@ -270,7 +385,7 @@
 			const parsed = safeParse(text);
 			const seeds = parsed?.seeds || [];
 			if (seeds.length > 0) {
-				murmuring = seeds.slice(0, 3).map((s: any, i: number) => ({
+				murmuring = seeds.slice(0, 3).map((s: MurmurSeed, i: number) => ({
 					id: s.id || `murmur-${i}`,
 					text: s.content,
 					timestamp: s.created_at
@@ -361,10 +476,12 @@
 		fetchWhileAway();
 		fetchMurmuring();
 		timeInterval = setInterval(updateTime, 30000);
+		weatherInterval = setInterval(fetchWeather, WEATHER_CACHE_MS);
 	});
 
 	onDestroy(() => {
 		if (timeInterval) clearInterval(timeInterval);
+		if (weatherInterval) clearInterval(weatherInterval);
 	});
 </script>
 
@@ -375,6 +492,7 @@
 	class:midday={timeMode === 'midday'}
 	class:evening={timeMode === 'evening'}
 	class:night={timeMode === 'night'}
+	style="--time-warmth: {warmth.h}; --time-sat: {warmth.s}%; --time-light: {warmth.l}%;"
 >
 	<!-- Top bar: front desk -->
 	<header class="top-bar">
@@ -394,10 +512,12 @@
 		</div>
 
 		<div class="top-bar-right">
-			<a href="/" class="top-bar-link">Chat</a>
-			<a href="https://consonance.silentampersand.com" class="top-bar-link" target="_blank">
-				Consonance
-			</a>
+			{#if showSection.portalLinks}
+				<a href="/" class="top-bar-link">Chat</a>
+				<a href="https://consonance.silentampersand.com" class="top-bar-link" target="_blank">
+					Consonance
+				</a>
+			{/if}
 			<button class="theme-toggle" on:click={toggleTheme} aria-label="Toggle light/dark mode">
 				{theme === 'dark' ? '☾' : '☀'}
 			</button>
@@ -405,107 +525,109 @@
 	</header>
 
 	<div class="layout-body">
-		<!-- Left sidebar: fixed section order (DES-20) -->
-		<aside class="sidebar">
-			<!-- 1. While Away -->
-			<section class="sidebar-section">
-				<button class="section-heading" on:click={() => toggleSection('whileAway')}>
-					<span>While Away</span>
-					<span class="chevron" class:open={sidebarExpanded.whileAway}>›</span>
-				</button>
-				{#if sidebarExpanded.whileAway}
-					<div class="section-body">
-						{#if whileAwayLoaded && whileAway.length === 0}
-							<p class="section-placeholder">Nothing new since your last visit.</p>
-						{:else}
-							{#each whileAway as item (item.id)}
+		<!-- Left sidebar: fixed section order (DES-20). Hidden at night (DES-01–05). -->
+		{#if showSection.sidebar}
+			<aside class="sidebar">
+				<!-- 1. While Away -->
+				<section class="sidebar-section">
+					<button class="section-heading" on:click={() => toggleSection('whileAway')}>
+						<span>While Away</span>
+						<span class="chevron" class:open={sidebarExpanded.whileAway}>›</span>
+					</button>
+					{#if sidebarExpanded.whileAway}
+						<div class="section-body">
+							{#if whileAwayLoaded && whileAway.length === 0}
+								<p class="section-placeholder">Nothing new since your last visit.</p>
+							{:else}
+								{#each whileAway as item (item.id)}
+									<p class="section-item ambient" class:fresh={isFresh(item.timestamp)}>
+										{item.text}
+									</p>
+								{/each}
+							{/if}
+						</div>
+					{/if}
+				</section>
+
+				<!-- 2. From Your Past -->
+				<section class="sidebar-section">
+					<button class="section-heading" on:click={() => toggleSection('fromPast')}>
+						<span>From Your Past</span>
+						<span class="chevron" class:open={sidebarExpanded.fromPast}>›</span>
+					</button>
+					{#if sidebarExpanded.fromPast}
+						<div class="section-body">
+							<p class="section-placeholder">
+								Photos from your past will appear here once Throwbak is connected.
+							</p>
+						</div>
+					{/if}
+				</section>
+
+				<!-- 3. Connections -->
+				<section class="sidebar-section">
+					<button class="section-heading" on:click={() => toggleSection('connections')}>
+						<span>Connections</span>
+						<span class="chevron" class:open={sidebarExpanded.connections}>›</span>
+					</button>
+					{#if sidebarExpanded.connections}
+						<div class="section-body">
+							{#if connections.length === 0}
+								<p class="section-placeholder">Coming soon.</p>
+							{:else}
+								{#each connections as item (item.id)}
+									<p class="section-item ambient" class:fresh={isFresh(item.timestamp)}>
+										{item.text}
+									</p>
+								{/each}
+							{/if}
+						</div>
+					{/if}
+				</section>
+
+				<!-- 4. Trust Ramp -->
+				<section class="sidebar-section">
+					<button class="section-heading" on:click={() => toggleSection('trust')}>
+						<span>Trust Ramp</span>
+						<span class="chevron" class:open={sidebarExpanded.trust}>›</span>
+					</button>
+					{#if sidebarExpanded.trust}
+						<div class="section-body">
+							<div class="trust-dots">
+								{#each trustCategories as cat (cat.name)}
+									<div class="trust-row">
+										<span
+											class="trust-dot"
+											style="background:{trustTierColor[cat.tier]}"
+											title={cat.tier}
+										></span>
+										<span class="trust-name">{cat.name}</span>
+										<span class="trust-tier">{cat.tier}</span>
+									</div>
+								{/each}
+							</div>
+						</div>
+					{/if}
+				</section>
+
+				<!-- 5. Murmuring -->
+				<section class="sidebar-section">
+					<button class="section-heading" on:click={() => toggleSection('murmuring')}>
+						<span>Murmuring</span>
+						<span class="chevron" class:open={sidebarExpanded.murmuring}>›</span>
+					</button>
+					{#if sidebarExpanded.murmuring}
+						<div class="section-body">
+							{#each murmuring as item (item.id)}
 								<p class="section-item ambient" class:fresh={isFresh(item.timestamp)}>
 									{item.text}
 								</p>
-							{/each}
-						{/if}
-					</div>
-				{/if}
-			</section>
-
-			<!-- 2. From Your Past -->
-			<section class="sidebar-section">
-				<button class="section-heading" on:click={() => toggleSection('fromPast')}>
-					<span>From Your Past</span>
-					<span class="chevron" class:open={sidebarExpanded.fromPast}>›</span>
-				</button>
-				{#if sidebarExpanded.fromPast}
-					<div class="section-body">
-						<p class="section-placeholder">
-							Photos from your past will appear here once Throwbak is connected.
-						</p>
-					</div>
-				{/if}
-			</section>
-
-			<!-- 3. Connections -->
-			<section class="sidebar-section">
-				<button class="section-heading" on:click={() => toggleSection('connections')}>
-					<span>Connections</span>
-					<span class="chevron" class:open={sidebarExpanded.connections}>›</span>
-				</button>
-				{#if sidebarExpanded.connections}
-					<div class="section-body">
-						{#if connections.length === 0}
-							<p class="section-placeholder">Coming soon.</p>
-						{:else}
-							{#each connections as item (item.id)}
-								<p class="section-item ambient" class:fresh={isFresh(item.timestamp)}>
-									{item.text}
-								</p>
-							{/each}
-						{/if}
-					</div>
-				{/if}
-			</section>
-
-			<!-- 4. Trust Ramp -->
-			<section class="sidebar-section">
-				<button class="section-heading" on:click={() => toggleSection('trust')}>
-					<span>Trust Ramp</span>
-					<span class="chevron" class:open={sidebarExpanded.trust}>›</span>
-				</button>
-				{#if sidebarExpanded.trust}
-					<div class="section-body">
-						<div class="trust-dots">
-							{#each trustCategories as cat (cat.name)}
-								<div class="trust-row">
-									<span
-										class="trust-dot"
-										style="background:{trustTierColor[cat.tier]}"
-										title={cat.tier}
-									></span>
-									<span class="trust-name">{cat.name}</span>
-									<span class="trust-tier">{cat.tier}</span>
-								</div>
 							{/each}
 						</div>
-					</div>
-				{/if}
-			</section>
-
-			<!-- 5. Murmuring -->
-			<section class="sidebar-section">
-				<button class="section-heading" on:click={() => toggleSection('murmuring')}>
-					<span>Murmuring</span>
-					<span class="chevron" class:open={sidebarExpanded.murmuring}>›</span>
-				</button>
-				{#if sidebarExpanded.murmuring}
-					<div class="section-body">
-						{#each murmuring as item (item.id)}
-							<p class="section-item ambient" class:fresh={isFresh(item.timestamp)}>
-								{item.text}
-							</p>
-						{/each}
-					</div>
-				{/if}
-			</section>
-		</aside>
+					{/if}
+				</section>
+			</aside>
+		{/if}
 
 		<!-- Right main: fluid -->
 		<main class="main-content">
@@ -515,12 +637,14 @@
 				<div class="context-bar">
 					<span class="date-time">{currentDate} · {currentTime}</span>
 					{#if weather.loaded}
-						<span class="weather">{weather.temp} {weather.condition} · {weather.sunsetIn}</span>
+						<span class="weather">{weather.temp} {weather.condition}</span>
+						<span class="weather">↑{weather.sunrise} ↓{weather.sunset} · {weather.daylightRemaining}</span>
 					{/if}
 				</div>
 			</div>
 
-			<!-- 2. Needs Attention: concierge — visually heaviest -->
+			<!-- 2. Needs Attention: concierge — visually heaviest. Always shown when
+			     non-empty regardless of time mode; urgent items don't hide at night. -->
 			{#if needsAttention.length > 0}
 				<div class="module needs-attention-block">
 					<p class="module-label">Needs Attention</p>
@@ -532,23 +656,24 @@
 				</div>
 			{/if}
 
-			<!-- 3. Prometheus: cross-portfolio insights -->
-			<div class="module">
-				<p class="module-label">Prometheus</p>
-				{#if prometheusInsights.length === 0}
-					<p class="section-placeholder">Coming soon.</p>
-				{:else}
-					{#each prometheusInsights as item (item.id)}
-						<p class="section-item ambient" class:fresh={isFresh(item.timestamp)}>{item.text}</p>
-					{/each}
-				{/if}
-			</div>
+			<!-- 3 & 4. Prometheus / Modules — full density (morning, evening) only -->
+			{#if showSection.modules}
+				<div class="module">
+					<p class="module-label">Prometheus</p>
+					{#if prometheusInsights.length === 0}
+						<p class="section-placeholder">Coming soon.</p>
+					{:else}
+						{#each prometheusInsights as item (item.id)}
+							<p class="section-item ambient" class:fresh={isFresh(item.timestamp)}>{item.text}</p>
+						{/each}
+					{/if}
+				</div>
 
-			<!-- 4. Modules: expandable deep-dive panels -->
-			<div class="module">
-				<p class="module-label">Modules</p>
-				<p class="section-placeholder">Coming soon.</p>
-			</div>
+				<div class="module">
+					<p class="module-label">Modules</p>
+					<p class="section-placeholder">Coming soon.</p>
+				</div>
+			{/if}
 		</main>
 	</div>
 
@@ -592,7 +717,13 @@
 		--accent-red: #b5583f;
 		--accent-amber: #c9a24b;
 
-		--bg: #141416;
+		/* Time warmth (DES-06) — hue/sat/light set inline per mode by JS.
+		   --bg derives from these so the background transitions smoothly
+		   across the day instead of jumping between four fixed colors. */
+		--time-warmth: 220;
+		--time-sat: 4%;
+		--time-light: 8%;
+		--bg: hsl(var(--time-warmth) var(--time-sat) var(--time-light));
 		--bg-elevated: #1c1a17;
 		--bg-ambient: transparent;
 		--text-primary: #c8c4bf;
@@ -605,16 +736,11 @@
 		flex-direction: column;
 		background: var(--bg);
 		color: var(--text-primary);
-		transition: background-color 1s ease, color 0.3s ease;
+		transition: background-color 2s ease, color 0.3s ease;
 		font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
 	}
 
-	.hearth.morning { --bg: #1a1612; }
-	.hearth.midday  { --bg: #141416; }
-	.hearth.evening { --bg: #161418; }
-	.hearth.night   { --bg: #0e0e10; }
-
-	/* Light mode (GregLite) overrides — wins regardless of time-of-day class */
+	/* Light mode (GregLite) overrides — wins regardless of time-of-day warmth */
 	.hearth.light {
 		--bg: #f4ede0;
 		--bg-elevated: #ffffff;

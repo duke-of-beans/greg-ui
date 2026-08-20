@@ -16,6 +16,8 @@ set -euo pipefail
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
 cd "$SCRIPT_DIR" || exit 1
 
+PYTHON_CMD=$(command -v python3 || command -v python)
+
 # ── Playwright browser installation (if configured) ──────────────────────────
 
 if [[ "${WEB_LOADER_ENGINE,,}" == "playwright" ]]; then
@@ -103,7 +105,6 @@ echo "Seeding Greg functions..."
 
 # ── Launch uvicorn ───────────────────────────────────────────────────────────
 
-PYTHON_CMD=$(command -v python3 || command -v python)
 UVICORN_WORKERS="${UVICORN_WORKERS:-1}"
 
 if [[ "$#" -gt 0 ]]; then

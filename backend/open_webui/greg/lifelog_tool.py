@@ -6,9 +6,13 @@ Lets David capture life moments, thoughts, and memories through conversation.
 Also provides "on this day" lookback from brain.db and lifelog entries.
 
 Stores via CORTEX brain_remember (brain.db) for immediate availability.
+
+Valve defaults read from CORTEX_URL / CORTEX_KEY environment variables —
+never hardcoded here, since this repo is public.
 """
 
 import json
+import os
 import aiohttp
 from datetime import datetime, timedelta
 from typing import Optional
@@ -18,12 +22,14 @@ from pydantic import BaseModel, Field
 class Tools:
     class Valves(BaseModel):
         CORTEX_URL: str = Field(
-            default="https://cortex-production-d0d7.up.railway.app",
+            default_factory=lambda: os.getenv(
+                "CORTEX_URL", "https://cortex-production-d0d7.up.railway.app"
+            ),
             description="CORTEX Railway URL"
         )
         CORTEX_KEY: str = Field(
-            default="yevDScM_JKyl4zNl8js_ZJg_8oZRxe4SWcSvMcMRZF4",
-            description="CORTEX Bearer token"
+            default_factory=lambda: os.getenv("CORTEX_KEY", ""),
+            description="CORTEX Bearer token (set via CORTEX_KEY env var)"
         )
 
     def __init__(self):

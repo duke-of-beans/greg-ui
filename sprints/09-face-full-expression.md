@@ -13,10 +13,17 @@ The face runs on the Skylight tablet (wall-mounted kiosk) and on M3 laptop.
 ## Task
 
 ### 1. Affect-Driven Expression
-Connect the face to Greg's affect state via CORTEX MCP:
+Connect the face to Greg's affect state via CORTEX's `affect` tool. **Do not
+call CORTEX directly from this Svelte page with a hardcoded bearer token**
+— this repo is public, and a token embedded in a `.svelte` file ships in
+the JS bundle and git history. Route through the Open WebUI backend
+instead, the same way `/home` does (see `backend/open_webui/routers/
+greg_home.py`'s `/api/v1/greg/mcp` proxy, added in sprint 01): either reuse
+that endpoint (add `'affect'` to its `ALLOWED_TOOLS` set) or add an
+`/api/v1/greg/affect` route following the same pattern — `CORTEX_URL`/
+`CORTEX_KEY` come from env vars via `greg_cortex_client.py`, never a
+literal in source.
 ```
-POST https://cortex-production-d0d7.up.railway.app/mcp
-Auth: Bearer yevDScM_JKyl4zNl8js_ZJg_8oZRxe4SWcSvMcMRZF4
 Body: { method: "tools/call", params: { name: "affect", arguments: {} }}
 ```
 
