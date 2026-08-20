@@ -97,6 +97,36 @@ class Tools:
 
         return f"Nothing found for {month_name} yet. As your lifelog grows, this will fill with memories."
 
+    async def recent_texts(self, about: str = "") -> str:
+        """Recent text-message context absorbed via ROSETTA's SMS channel (PO-01).
+        Optionally filter by topic, e.g. about='mom' or about='the garage'.
+        Note: the phone-side SMS -> webhook bridge (Tasker/MacroDroid) is a
+        separate manual setup step, not part of this tool — this only
+        surfaces what's already been ingested via POST /api/rosetta/sms."""
+        query = f"text message sms {about}".strip() if about else "recent text messages"
+        result = await self._mcp_call("recall", {"query": query, "limit": 5})
+
+        if result:
+            try:
+                content_text = result.get("result", {}).get("content", [{}])[0].get("text", "")
+                parsed = json.loads(content_text) if content_text else {}
+                results = parsed.get("results", [])
+                sms_results = [
+                    r for r in results
+                    if r.get("metadata", {}).get("channel") == "sms" or "sms" in r.get("content", "").lower()
+                ] or results
+                if sms_results:
+                    lines = ["**Recent texts:**\n"]
+                    for r in sms_results[:5]:
+                        date = r.get("created_at", "")[:10]
+                        content = r.get("content", "")[:200]
+                        lines.append(f"- {date}: {content}")
+                    return "\n".join(lines)
+            except Exception:
+                pass
+
+        return "Nothing in the SMS channel yet — the phone-side bridge may not be wired up, or nothing's come through."
+
     async def how_long_since(self, event: str) -> str:
         """How long has it been since something? Searches brain.db for the event and calculates duration."""
         result = await self._mcp_call("recall", {

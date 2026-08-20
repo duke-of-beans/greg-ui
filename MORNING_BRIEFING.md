@@ -1,42 +1,113 @@
 # MORNING BRIEFING — greg-ui (HEARTH Chat)
-**Sprint:** 06 — Thinking Display + Depth Controls + Personality
+**Sprint:** 10 — Capacity Governor + Sprint Control Surface
 **Date:** 2026-08-20
-**Session Duration:** ~30 min
+**Session Duration:** ~1h
 
 ## SHIPPED
-- Depth override via message prefix (`/quick /auto /deep /deliberate`) added to `cortex_pipe.py` — lets David switch depth mid-chat without touching the model picker
-- Personality metadata footer added to every Greg reply in `cortex_pipe.py` — muted line: `Greg · {affect} · {role} · N memories · {provider} · {ms}ms total`
-- Fixed ROSETTA double-capture bug in `brain_context_filter.py` outlet — it was ingesting David's message a second time for every HEARTH pipe-model turn, on top of `cortex_pipe.py`'s own capture; outlet now skips `cortex_pipe.*` / `greg-*` models
+- **greg-ui frontend, applied to working tree (not yet committed — see FRICTION LOG #1):**
+  - Capacity governor strip under the top bar in `(app)/home/+page.svelte`: gradient bar,
+    mode label, "N% remaining · N days left", and a reserve-mode "Claude Code paused" warning.
+  - Sprint Control Surface module: last 5 sprints with status/project/priority/lane, elapsed
+    time + model for running sprints, Hold button on pending sprints, Cancel button on running
+    sprints.
+  - Cost Dashboard chips: today's spend, this-cycle spend vs $200, top-3-projects breakdown —
+    derived client-side from the same 5-sprint list (see NEXT QUEUE — this is a last-5 sample,
+    not a real cycle aggregate).
+  - New backend proxy routes in `routers/greg_home.py`: `GET /home/capacity`,
+    `GET /home/sprints`, `PATCH /home/sprints/action` — mirror the existing CORTEX-proxy
+    pattern (credentials stay server-side, browser never talks to Home directly).
+  - New `greg_home_api_client.py`, mirrors `greg_cortex_client.py`'s shape exactly.
+  - `.env.example` and `docker-compose.greg.yaml`: added `GREG_HOME_API_URL` (defaulted to
+    Home's real Railway domain, looked up via the Railway API — see UNEXPECTED FINDINGS) and
+    `GREG_HOME_API_KEY` (blank — Home doesn't check it yet, see FRICTION LOG #3).
+- **portfolio.max_capacity table** created in Consonance Supabase (migration
+  `create_max_capacity_table`), plus a `metadata jsonb` column added to `portfolio.sprint_queue`
+  (it had none — needed for per-sprint cost capture).
+- **Home backend, drafted only — NOT applied** (Sprint 05 was running in
+  `D:\Projects\Home` all session; David asked me not to touch it): `src/capacity.ts` (full
+  file) and `HOME_CAPACITY_INTEGRATION.md` (exact snippets for `index.ts`, `home-api.ts`,
+  `server.ts`) delivered to David as files. Apply after Sprint 05 lands and `git pull` is clean.
 
 ## QUALITY GATES
 | Gate | Result |
 |------|--------|
-| Python compile (`py_compile`) — cortex_pipe.py, brain_context_filter.py | PASS |
-| Git pull before starting | PASS — already up to date with origin/main |
-| Frontend build (Svelte/tsc) | N/A — no frontend files touched this session (see Decisions) |
-| Git status pre-commit | Clean except intended changes |
+| Svelte `<script>` block — extracted + `tsc --noEmit` syntax pass | PASS (only pre-existing `$:`-implicit-declaration false positives, same pattern the file already had for `showSection`/`warmth`; no new error categories) |
+| `greg_home_api_client.py`, `greg_home.py` — `python3 -m py_compile` | PASS |
+| `capacity.ts` (drafted, not applied) — `tsc --noEmit` syntax pass | PASS (only missing-`@types/node` noise, expected outside the real project) |
+| Brace/tag balance sweep on the edited `.svelte` file | PASS (24/24 `{#if}`, 7/7 `{#each}`, 0 net brace depth) |
+| **Real Svelte build (`svelte-check` / `vite build`)** | **NOT RUN** — see FRICTION LOG #1 |
+| Git pull before starting | Not applicable to greg-ui this session (no prior local diff); **git commit/push not done** — see FRICTION LOG #1 |
 
 ## DECISIONS MADE BY AGENT
-- **Skipped building a new Svelte "thinking display" component (Task 1).** Read `StatusHistory.svelte` + `StatusItem.svelte` — the fork already renders `event_emitter` status updates as a shimmering, timeline-dot, collapsible history natively, and `cortex_pipe.py` already emits the exact "Recalled N memories (Xms)" / "Drafted via {provider} (Xms)" / "{affect} · {role} (Xms)" text this task asked for (shipped in last night's sprint-01 commit, 94be8182). Building a second component would duplicate working, polished upstream UI for no gain. Alternative was: build a redundant component anyway to "complete the task on paper."
-- **Skipped a custom depth-selector UI (Task 2).** `cortex_pipe.py.pipes()` already exposes Quick/Auto/Deep/Deliberate as four separate selectable models in Open WebUI's native model picker — that *is* a depth selector. Added the `/quick /deep /deliberate` message-prefix override from the spec's alternate suggestion as a low-risk backend-only complement instead of a second, possibly-conflicting frontend control.
-- **Personality footer is a single muted line, not a true collapsible (Task 3).** Traced the fork's `<details>` handling: `ConsecutiveDetailsGroup.svelte` is hardcoded to `tool_calls` / `reasoning` / `code_interpreter` token attributes and ignores arbitrary `<summary>` text — a plain `<details><summary>Greg · ...</summary></details>` from the pipe would silently render as "Explored" with none of the intended content. Wiring a real new token type through the marked pipeline is genuine untested frontend surgery. Shipped the reliable single-line version; the real collapsible is a good follow-up sprint if David wants it.
+- **Did not touch `D:\Projects\Home` at all**, per David's explicit instruction (Sprint 05 running
+  there). Everything Home-side is a drafted handoff, not applied.
+- **Chose a new `PATCH /api/home/sprints/action` route instead of overloading the existing
+  `PATCH /api/home/action`.** The existing route's `handleActionItem()` operates on
+  `greg_thoughts` UUIDs; `sprint_queue.sprint_id` is a different ID shape (text, e.g.
+  `AUT-...`) with different semantics (hold/cancel vs approve/dismiss/defer). Overloading one
+  endpoint with two unrelated ID types seemed like the wrong call to make unilaterally —
+  flagged as a new route instead, documented in `HOME_CAPACITY_INTEGRATION.md`.
+- **Did not fabricate real Claude Code token telemetry.** The Claude Code subprocess path in
+  `index.ts` hardcodes `tokens: {input:0, output:0}` (MAX is flat-rate, not metered per-call).
+  Rather than inventing a precise-looking number, `capacity.ts`'s usage-logging call is a
+  clearly-labeled duration-based estimate with a TODO pointing at `claude --print
+  --output-format json` as the real fix.
+- **Looked up Home's real Railway domain via a read-only Railway API call** (`domains` query,
+  no deploy/env mutation) rather than leaving a placeholder — safe against Sprint 05 since it
+  doesn't touch the running deployment.
+- **Did not set `HOME_API_KEY` / `GREG_HOME_API_KEY` on Railway myself**, even though I have a
+  Railway API token that could do it. Setting a Railway env var typically triggers a redeploy,
+  which would have restarted Home mid-Sprint-05. Documented as a manual follow-up instead.
 
 ## UNEXPECTED FINDINGS
-- Sprint 06's Task 1 and most of Task 4 (ROSETTA capture) were already substantially implemented in commit 94be8182 ("sprint 01 + layout D merge", pushed last night) — `cortex_pipe.py`'s docstring even says "Updated 2026-08-20: AI Gateway architecture, enhanced thinking display." Worth checking whether sprint 06 was partially executed before this session, or whether sprint 01's scope quietly absorbed it.
-- The ROSETTA double-capture bug (fixed above) would have been silently duplicating every HEARTH message in `rosetta_inbox` since that commit landed — not caught by any test, only found by tracing inlet/outlet logic against `cortex_pipe.py`'s own capture.
-- No `CLAUDE_INSTRUCTIONS.md`, `BACKLOG.md`, or `STATUS.md` exist at this repo's root (it's an upstream OSS fork, not a portfolio-scaffolded project) — pre-flight items (production URL, deploy flow) weren't verifiable from repo docs. Deploy appears to be Docker-based (`docker-compose.greg.yaml`) rather than Vercel; recommend confirming the actual deploy target before the next sprint touches anything deploy-related.
+- **greg-ui's `/home` page had zero connection to the Home backend before this sprint.**
+  Sprint 10's spec assumed "Pull from Home API: GET /api/home/desk already has budget info" as
+  if the frontend already called it — it didn't. The `/home` hearth page only ever called
+  CORTEX MCP (`/greg/mcp`, `/greg/greeting`). This sprint had to build the entire bridge
+  (Python client + proxy routes + env wiring), not just consume an existing one.
+- **There is no standalone `GET /api/home/desk` route on Home.** `handleGetDesk()` is nested
+  inside `GET /api/home`'s aggregate response under `.desk`. Wired the proxy and
+  `capacity_state` placement to match that, not the spec's assumed route shape.
+- **Home's `/api/home/*` HTTP surface has no inbound authentication at all**, and is reachable
+  at a public Railway domain (`executor-production-f8aa.up.railway.app`). This predates Sprint
+  10, but Sprint 10 adds a new state-mutating endpoint (hold/cancel a sprint) to that
+  unauthenticated surface, which is enough that I flagged it rather than quietly building on
+  top of it. See `HOME_CAPACITY_INTEGRATION.md` §6b.
+- **Cancelling a running Claude Code sprint isn't really possible with the current dispatch
+  code.** It uses `execSync()`, which blocks synchronously — no subprocess handle survives to
+  kill mid-flight. The drafted `handleSprintAction('cancel')` only flips `sprint_queue.status`;
+  it doesn't interrupt the process. Real cancellation needs `execSync` → `spawn()` + a PID map,
+  which is a separate refactor, not scoped into this sprint.
+- **`portfolio.sprint_queue` had no `metadata` column** despite the spec assuming
+  "Store per-sprint cost in sprint_queue metadata" — added it as part of the same migration
+  that created `max_capacity`.
 
 ## FRICTION LOG
 | # | Category | Description | Resolution |
 |---|----------|--------------|------------|
-| 1 | TOOL | Environment notes warned Desktop Commander writes may silently land in a sandboxed copy instead of David's real D:\ drive (a documented past incident) | Fixed — verified empirically via an independent device-bridge listing before any real edit; confirmed writes are real in this session |
-| 2 | ENV | `python` / `uv` not on PATH in the MCP-launched cmd shell | Fixed — located real interpreter at `D:\Programs\Python312\python.exe`, used full path for compile verification |
+| 1 | TOOL | `device_bash` (the isolated Linux environment on David's machine) was unavailable for the entire session ("Workspace unavailable... failed to start"), on every retry. That blocked running the real Svelte build/`svelte-check`, and blocked `git add/commit/push` for greg-ui entirely. | Not fixed this session — did the best static verification available (extracted-script `tsc --noEmit`, `py_compile`, brace/tag balance) and left the working-tree changes applied via the file bridge, uncommitted. **David needs to `git status`, review, and commit/push greg-ui himself, or ask me to retry once `device_bash` recovers.** |
+| 2 | TOOL | This session's GitHub API access is not attached to either `duke-of-beans/home` or `duke-of-beans/greg-ui` (`api.github.com` calls return "GitHub access to this repository is not enabled for this session... Use add_repo") — and I don't have an `add_repo` tool. | Worked entirely through the device bridge (file read/write) plus Supabase/Railway MCP tools instead. |
+| 3 | SCOPE | Home's `/api/home/*` routes have no inbound auth — adding one means a Railway env var (redeploy risk mid-Sprint-05) plus a `server.ts` code change I couldn't make. | Documented as a required follow-up in `HOME_CAPACITY_INTEGRATION.md` §6b; not fixed this session by design. |
 
-Fixed This Session: 2
-Backlogged: 0
+Fixed This Session: 0
+Backlogged: 3 (device_bash recovery + commit, Home auth gap, real token telemetry for capacity)
 Logged: 0
 
 ## NEXT QUEUE
-- Sprint 07 — Variable Reward / Info Scent — next in the numbered queue
-- Consider a real follow-up: wire a `greg_meta` token type through the marked pipeline + `ConsecutiveDetailsGroup.svelte` if David wants the personality footer to be genuinely click-to-expand rather than a single muted line
-- Confirm greg-ui's actual production deploy target (Docker/Railway/other) and add a Pre-Flight section to a new `CLAUDE_INSTRUCTIONS.md` so future sprints don't have to re-derive it
+- **Apply `HOME_CAPACITY_INTEGRATION.md` to `D:\Projects\Home`** once Sprint 05 is clear:
+  `git pull`, drop in `capacity.ts`, apply the `index.ts`/`home-api.ts`/`server.ts` snippets,
+  `npm run build` (or whatever the real build command is — I didn't have a way to check),
+  then commit/push.
+- **Add `HOME_API_KEY` auth** to Home's `/api/home/*` routes (§6b) before this surface sees any
+  real traffic — right now `PATCH /api/home/sprints/action` is an unauthenticated way to cancel
+  Greg's work from anyone who has the Railway domain.
+- **Commit + push greg-ui** — the working tree has this sprint's changes but nothing is
+  committed. Either retry with me once `device_bash` is back, or handle it directly.
+- **Real token telemetry for the Claude Code lane**: switch `claude --print` to
+  `--output-format json` in `index.ts` so `logCapacityUsage()` can log real counts instead of a
+  duration-based estimate.
+- **Cost Dashboard is currently last-5-sprints-only**, not a real cycle aggregate — if David
+  wants an accurate "$X.XX this cycle" figure, `handleListSprints()`/the frontend need a
+  dedicated cost-aggregate query against `max_capacity`/`sprint_queue` scoped to
+  `cycle_start`, not just the 5 most recent rows.
+- Sprint 11 — next in the numbered queue.

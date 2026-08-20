@@ -72,6 +72,7 @@
 	let breathePhase = true;
 	let timeInterval: ReturnType<typeof setInterval>;
 	let weatherInterval: ReturnType<typeof setInterval>;
+	let capacityInterval: ReturnType<typeof setInterval>;
 
 	const FALLBACK_GREETINGS: Record<TimeMode, string> = {
 		morning: "Good morning, David — here's what happened while you were away.",
@@ -295,6 +296,143 @@
 	}
 
 	// ============================================================
+	// Capacity Governor + Sprint Control Surface + Cost Dashboard (Sprint 10)
+	// Proxied through the backend (see greg_home.py /home/capacity,
+	// /home/sprints) — same posture as the CORTEX proxy above: this page
+	// never talks to the Home Railway service directly.
+	// ============================================================
+	type CapacityMode = 'abundant' | 'moderate' | 'scarce' | 'reserve' | 'unknown';
+	type CapacityState = {
+		cycle_start: string | null;
+		cycle_end: string | null;
+		estimated_remaining_pct: number | null;
+		tokens_used_by_greg: number;
+		tokens_used_by_david: number;
+		mode: CapacityMode;
+		claude_code_enabled: boolean | null;
+	};
+	type Sprint = {
+		sprint_id: string;
+		project: string;
+		title: string;
+		priority: string;
+		status: string;
+		lane: string;
+		model: string | null;
+		elapsed_ms: number | null;
+		cost_usd: number | null;
+		queued_at: string | null;
+		started_at: string | null;
+		completed_at: string | null;
+	};
+
+	let capacityState: CapacityState | null = null;
+	let capacityReachable = false;
+	let sprints: Sprint[] = [];
+	let sprintsReachable = false;
+	let sprintActionPending: Record<string, boolean> = {};
+
+	const CAPACITY_MODE_LABEL: Record<CapacityMode, string> = {
+		abundant: 'abundant',
+		moderate: 'moderate',
+		scarce: 'scarce',
+		reserve: 'reserve',
+		unknown: 'unknown'
+	};
+	const CAPACITY_MODE_COLOR: Record<CapacityMode, string> = {
+		abundant: '#6b8f71',
+		moderate: '#c9a24b',
+		scarce: '#c9814b',
+		reserve: '#b5583f',
+		unknown: '#5a554f'
+	};
+
+	function daysUntil(iso: string | null): number | null {
+		if (!iso) return null;
+		const diffMs = new Date(iso).getTime() - Date.now();
+		if (Number.isNaN(diffMs)) return null;
+		return Math.max(0, Math.ceil(diffMs / (24 * 60 * 60 * 1000)));
+	}
+
+	async function fetchCapacity() {
+		try {
+			const res = await fetch(`${WEBUI_API_BASE_URL}/greg/home/capacity`, {
+				headers: { authorization: `Bearer ${localStorage.token}` }
+			});
+			if (!res.ok) throw new Error(`status ${res.status}`);
+			const data = await res.json();
+			capacityState = data.capacity_state;
+			capacityReachable = !!data.reachable;
+		} catch {
+			capacityReachable = false;
+		}
+	}
+
+	async function fetchSprints() {
+		try {
+			const res = await fetch(`${WEBUI_API_BASE_URL}/greg/home/sprints`, {
+				headers: { authorization: `Bearer ${localStorage.token}` }
+			});
+			if (!res.ok) throw new Error(`status ${res.status}`);
+			const data = await res.json();
+			sprints = data.sprints || [];
+			sprintsReachable = !!data.reachable;
+		} catch {
+			sprintsReachable = false;
+		}
+	}
+
+	async function sprintAction(sprintId: string, action: 'hold' | 'cancel') {
+		if (sprintActionPending[sprintId]) return;
+		sprintActionPending = { ...sprintActionPending, [sprintId]: true };
+		try {
+			const res = await fetch(`${WEBUI_API_BASE_URL}/greg/home/sprints/action`, {
+				method: 'PATCH',
+				headers: {
+					'Content-Type': 'application/json',
+					authorization: `Bearer ${localStorage.token}`
+				},
+				body: JSON.stringify({ sprint_id: sprintId, action })
+			});
+			if (res.ok) await fetchSprints();
+		} catch {
+			/* best-effort — sprint list will self-correct on next poll */
+		} finally {
+			sprintActionPending = { ...sprintActionPending, [sprintId]: false };
+		}
+	}
+
+	function formatElapsed(ms: number | null): string {
+		if (ms === null) return '';
+		const mins = Math.floor(ms / 60000);
+		const secs = Math.floor((ms % 60000) / 1000);
+		return mins > 0 ? `${mins}m ${secs}s` : `${secs}s`;
+	}
+
+	function formatCost(usd: number | null): string {
+		if (usd === null || usd === undefined) return '—';
+		return `$${usd.toFixed(2)}`;
+	}
+
+	// This cycle / today spend + top-project breakdown, derived from the
+	// sprint list (best-effort, last-5-only — see NEXT QUEUE note in the
+	// morning briefing re: extending this to a dedicated cost query if
+	// David wants deeper history than the Sprint Control Surface already
+	// fetches).
+	$: cycleSpend = sprints.reduce((sum, s) => sum + (s.cost_usd || 0), 0);
+	$: todaySpend = sprints
+		.filter((s) => s.completed_at && isFresh(s.completed_at))
+		.reduce((sum, s) => sum + (s.cost_usd || 0), 0);
+	$: topProjects = Object.entries(
+		sprints.reduce((acc: Record<string, number>, s) => {
+			if (s.cost_usd) acc[s.project] = (acc[s.project] || 0) + s.cost_usd;
+			return acc;
+		}, {})
+	)
+		.sort((a, b) => b[1] - a[1])
+		.slice(0, 3);
+
+	// ============================================================
 	// Calm technology — item "freshness" helper.
 	// New items get a green border-left that fades after 2 hours.
 	// Purely time-based, no badges, no counters.
@@ -475,13 +613,23 @@
 		fetchDeskMetrics();
 		fetchWhileAway();
 		fetchMurmuring();
+		fetchCapacity();
+		fetchSprints();
 		timeInterval = setInterval(updateTime, 30000);
 		weatherInterval = setInterval(fetchWeather, WEATHER_CACHE_MS);
+		// Capacity + sprint list poll every 60s — this is operational
+		// monitoring (governor mode, running sprints), not ambient content,
+		// so it refreshes independent of time-of-day density.
+		capacityInterval = setInterval(() => {
+			fetchCapacity();
+			fetchSprints();
+		}, 60000);
 	});
 
 	onDestroy(() => {
 		if (timeInterval) clearInterval(timeInterval);
 		if (weatherInterval) clearInterval(weatherInterval);
+		if (capacityInterval) clearInterval(capacityInterval);
 	});
 </script>
 
@@ -523,6 +671,38 @@
 			</button>
 		</div>
 	</header>
+
+	<!-- Capacity governor strip (Sprint 10) — MAX pool state. Shown even if
+	     unreachable (labeled 'unknown'), never silently hidden, since this
+	     exists specifically so David isn't surprised by Claude Code pausing. -->
+	{#if capacityState}
+		<div class="capacity-strip" title={capacityReachable ? '' : 'Home service unreachable — showing last known state'}>
+			<div class="capacity-bar-track">
+				<div
+					class="capacity-bar-fill"
+					style="width: {capacityState.estimated_remaining_pct ?? 0}%; background: {CAPACITY_MODE_COLOR[
+						capacityState.mode
+					]};"
+				></div>
+			</div>
+			<span class="capacity-mode" style="color: {CAPACITY_MODE_COLOR[capacityState.mode]};">
+				{CAPACITY_MODE_LABEL[capacityState.mode]}
+			</span>
+			{#if capacityState.estimated_remaining_pct !== null}
+				<span class="capacity-detail">
+					{capacityState.estimated_remaining_pct}% remaining
+					{#if daysUntil(capacityState.cycle_end) !== null}
+						· {daysUntil(capacityState.cycle_end)} days left
+					{/if}
+				</span>
+			{:else}
+				<span class="capacity-detail">state unavailable</span>
+			{/if}
+			{#if capacityState.mode === 'reserve'}
+				<span class="capacity-warning">Claude Code paused — AI Gateway only</span>
+			{/if}
+		</div>
+	{/if}
 
 	<div class="layout-body">
 		<!-- Left sidebar: fixed section order (DES-20). Hidden at night (DES-01–05). -->
@@ -642,6 +822,60 @@
 					{/if}
 				</div>
 			</div>
+
+			<!-- Sprint Control Surface + Cost Dashboard (Sprint 10) — operational,
+			     always visible regardless of time mode (same reasoning as Needs
+			     Attention below: this is monitoring, not ambient content). -->
+			{#if sprintsReachable && sprints.length > 0}
+				<div class="module sprints-block">
+					<p class="module-label">Sprints</p>
+					<div class="cost-summary">
+						<span class="cost-chip">Today: {formatCost(todaySpend)}</span>
+						<span class="cost-chip">This cycle: {formatCost(cycleSpend)} / $200</span>
+						{#if topProjects.length > 0}
+							<span class="cost-chip cost-chip-muted">
+								Top: {topProjects.map(([p, c]) => `${p} (${formatCost(c)})`).join(', ')}
+							</span>
+						{/if}
+					</div>
+					<div class="sprint-list">
+						{#each sprints as s (s.sprint_id)}
+							<div class="sprint-row">
+								<div class="sprint-row-main">
+									<span class="sprint-status status-{s.status}">{s.status}</span>
+									<span class="sprint-title">{s.title}</span>
+									<span class="sprint-meta">{s.project} · {s.priority} · {s.lane}</span>
+								</div>
+								<div class="sprint-row-detail">
+									{#if s.status === 'running'}
+										<span class="sprint-submeta">
+											{formatElapsed(s.elapsed_ms)}{s.model ? ` · ${s.model}` : ''}
+										</span>
+										<button
+											class="sprint-action-btn"
+											disabled={sprintActionPending[s.sprint_id]}
+											on:click={() => sprintAction(s.sprint_id, 'cancel')}
+										>
+											Cancel
+										</button>
+									{:else if s.status === 'pending'}
+										<span class="sprint-submeta">queued</span>
+										<button
+											class="sprint-action-btn"
+											disabled={sprintActionPending[s.sprint_id]}
+											on:click={() => sprintAction(s.sprint_id, 'hold')}
+										>
+											Hold
+										</button>
+									{:else}
+										<span class="sprint-submeta">{formatCost(s.cost_usd)}</span>
+									{/if}
+								</div>
+							</div>
+						{/each}
+					</div>
+				</div>
+			{/if}
 
 			<!-- 2. Needs Attention: concierge — visually heaviest. Always shown when
 			     non-empty regardless of time mode; urgent items don't hide at night. -->
@@ -1118,6 +1352,165 @@
 		10% { opacity: 1; }
 		80% { opacity: 1; }
 		100% { opacity: 0; }
+	}
+
+	/* ============================================================
+	   Capacity governor strip (Sprint 10)
+	   ============================================================ */
+	.capacity-strip {
+		display: flex;
+		align-items: center;
+		gap: 0.75rem;
+		padding: 0.35rem 1.25rem;
+		border-bottom: 1px solid var(--border-subtle);
+		font-size: 0.72rem;
+	}
+
+	.capacity-bar-track {
+		flex: 0 0 140px;
+		height: 4px;
+		border-radius: 2px;
+		background: var(--border-subtle);
+		overflow: hidden;
+	}
+
+	.capacity-bar-fill {
+		height: 100%;
+		transition: width 0.6s ease, background-color 0.6s ease;
+	}
+
+	.capacity-mode {
+		text-transform: uppercase;
+		letter-spacing: 0.06em;
+		font-weight: 600;
+	}
+
+	.capacity-detail {
+		color: var(--text-muted);
+	}
+
+	.capacity-warning {
+		color: var(--accent-red);
+		font-weight: 500;
+	}
+
+	/* ============================================================
+	   Sprint Control Surface + Cost Dashboard (Sprint 10)
+	   ============================================================ */
+	.sprints-block {
+		gap: 0.75rem;
+	}
+
+	.cost-summary {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.6rem;
+	}
+
+	.cost-chip {
+		font-size: 0.76rem;
+		color: var(--text-secondary);
+		background: var(--bg-elevated);
+		border-radius: 4px;
+		padding: 0.25rem 0.6rem;
+	}
+
+	.cost-chip-muted {
+		color: var(--text-muted);
+	}
+
+	.sprint-list {
+		display: flex;
+		flex-direction: column;
+		gap: 0.5rem;
+	}
+
+	.sprint-row {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 0.75rem;
+		background: var(--bg-elevated);
+		border-radius: 6px;
+		padding: 0.6rem 0.85rem;
+		font-size: 0.82rem;
+	}
+
+	.sprint-row-main {
+		display: flex;
+		align-items: center;
+		gap: 0.6rem;
+		overflow: hidden;
+	}
+
+	.sprint-status {
+		font-size: 0.68rem;
+		text-transform: uppercase;
+		letter-spacing: 0.05em;
+		padding: 0.1rem 0.45rem;
+		border-radius: 3px;
+		color: var(--bg);
+		background: var(--text-muted);
+		flex-shrink: 0;
+	}
+
+	.sprint-status.status-running {
+		background: var(--accent);
+	}
+
+	.sprint-status.status-pending {
+		background: var(--accent-amber);
+	}
+
+	.sprint-status.status-failed {
+		background: var(--accent-red);
+	}
+
+	.sprint-title {
+		color: var(--text-primary);
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		max-width: 32ch;
+	}
+
+	.sprint-meta {
+		color: var(--text-muted);
+		font-size: 0.74rem;
+		flex-shrink: 0;
+	}
+
+	.sprint-row-detail {
+		display: flex;
+		align-items: center;
+		gap: 0.6rem;
+		flex-shrink: 0;
+	}
+
+	.sprint-submeta {
+		color: var(--text-muted);
+		font-size: 0.74rem;
+	}
+
+	.sprint-action-btn {
+		background: transparent;
+		border: 1px solid var(--border-subtle);
+		border-radius: 4px;
+		color: var(--text-secondary);
+		font-size: 0.72rem;
+		padding: 0.25rem 0.6rem;
+		cursor: pointer;
+		transition: border-color 0.3s, color 0.3s;
+	}
+
+	.sprint-action-btn:hover:not(:disabled) {
+		border-color: var(--accent-red);
+		color: var(--text-primary);
+	}
+
+	.sprint-action-btn:disabled {
+		opacity: 0.4;
+		cursor: default;
 	}
 
 	/* ============================================================
