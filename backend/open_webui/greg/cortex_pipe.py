@@ -10,10 +10,10 @@ Three-stage cognitive pipeline:
 Status timeline shows timed stages with elapsed time.
 
 Four depth models:
-  Greg Quick      — 3 memories, casual, fast
-  Greg Auto       — 8 memories, casual (default)
-  Greg Deep       — 15 memories, technical, full federation
-  Greg Deliberate — 20 memories, formal, multi-model
+  Greg /quick      — 3 memories, casual, fast
+  Greg /auto       — 8 memories, casual (default)
+  Greg /deep       — 15 memories, technical, full federation
+  Greg /deliberate — 20 memories, formal, multi-model
 
 Updated 2026-08-20: AI Gateway architecture, enhanced thinking display
 
@@ -55,15 +55,15 @@ class Pipe:
     def __init__(self):
         self.type = "pipe"
         self.id = "cortex_pipe"
-        self.name = "CORTEX"
+        self.name = "Greg"
         self.valves = self.Valves()
 
     def pipes(self):
         return [
-            {"id": "greg-quick", "name": "Greg Quick"},
-            {"id": "greg-auto", "name": "Greg Auto"},
-            {"id": "greg-deep", "name": "Greg Deep"},
-            {"id": "greg-deliberate", "name": "Greg Deliberate"},
+            {"id": "greg-quick", "name": "/quick"},
+            {"id": "greg-auto", "name": "/auto"},
+            {"id": "greg-deep", "name": "/deep"},
+            {"id": "greg-deliberate", "name": "/deliberate"},
         ]
 
     # ── MCP call (Streamable HTTP) ───────────────────────────────────────
