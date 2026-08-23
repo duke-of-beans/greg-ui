@@ -1,0 +1,126 @@
+/* ============================================================
+   Gregore Brand Theme — custom.css
+   Loaded by app.html on every page. Overrides Open WebUI defaults
+   with the organic, warm palette from the Gregore design system.
+   
+   Palette source: /home and /face design tokens (living code).
+   ============================================================ */
+
+:root {
+  /* Primary accent — Gregore sage green */
+  --gregore-accent: #6b8f71;
+  --gregore-accent-hover: #5a7d60;
+  --gregore-accent-light: #8aaf91;
+  
+  /* Signal colors */
+  --gregore-amber: #c9a24b;
+  --gregore-orange: #c9814b;
+  --gregore-red: #b5583f;
+  
+  /* Dark mode surface */
+  --gregore-bg-dark: #141414;
+  --gregore-bg-elevated-dark: #1c1a17;
+  --gregore-text-dark: #c8c4bf;
+  --gregore-text-secondary-dark: #8a857f;
+  --gregore-text-muted-dark: #5a554f;
+  --gregore-border-dark: #2a2622;
+  
+  /* Light mode surface */
+  --gregore-bg-light: #f4ede0;
+  --gregore-bg-elevated-light: #ffffff;
+  --gregore-text-light: #3a2e22;
+  --gregore-text-secondary-light: #6b5c4a;
+  --gregore-text-muted-light: #a3927a;
+  --gregore-border-light: #e0d3bd;
+}
+
+/* ---- Dark mode overrides ---- */
+html.dark {
+  --color-gray-50: #c8c4bf;
+  --color-gray-100: #b0aca6;
+  --color-gray-200: #8a857f;
+  --color-gray-300: #6b6660;
+  --color-gray-400: #5a554f;
+  --color-gray-500: #3d3a36;
+  --color-gray-600: #2a2622;
+  --color-gray-700: #1c1a17;
+  --color-gray-800: #171512;
+  --color-gray-850: #12100d;
+  --color-gray-900: #0e0c0a;
+  --color-gray-950: #080706;
+}
+
+/* ---- Light mode overrides ---- */
+html.light {
+  --color-gray-50: #3a2e22;
+  --color-gray-100: #6b5c4a;
+  --color-gray-200: #a3927a;
+  --color-gray-300: #c4b59e;
+  --color-gray-400: #d6c9b3;
+  --color-gray-500: #e0d3bd;
+  --color-gray-600: #eae0cf;
+  --color-gray-700: #f0e8da;
+  --color-gray-800: #f4ede0;
+  --color-gray-850: #f8f3ea;
+  --color-gray-900: #fcfaf6;
+  --color-gray-950: #fefdfb;
+}
+
+/* ---- Accent color injection ---- */
+/* Buttons, active states, links */
+button[class*="primary"],
+.bg-blue-500,
+.bg-blue-600,
+[class*="bg-blue-"],
+[class*="text-blue-"] {
+  --tw-bg-opacity: 1;
+}
+
+/* Override the blue accent throughout with sage green */
+.bg-blue-500 { background-color: var(--gregore-accent) !important; }
+.bg-blue-600 { background-color: var(--gregore-accent-hover) !important; }
+.bg-blue-700 { background-color: #4d7053 !important; }
+.text-blue-500 { color: var(--gregore-accent) !important; }
+.text-blue-600 { color: var(--gregore-accent-hover) !important; }
+.hover\:bg-blue-600:hover { background-color: var(--gregore-accent-hover) !important; }
+.hover\:bg-blue-700:hover { background-color: #4d7053 !important; }
+.hover\:text-blue-600:hover { color: var(--gregore-accent-hover) !important; }
+.ring-blue-500 { --tw-ring-color: var(--gregore-accent) !important; }
+.focus\:ring-blue-500:focus { --tw-ring-color: var(--gregore-accent) !important; }
+.border-blue-500 { border-color: var(--gregore-accent) !important; }
+
+/* Scrollbar — warm instead of cold gray */
+::-webkit-scrollbar-thumb {
+  background: var(--gregore-text-muted-dark);
+  border-radius: 4px;
+}
+html.light ::-webkit-scrollbar-thumb {
+  background: var(--gregore-text-muted-light);
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* Chat input area — warmer border */
+html.dark textarea,
+html.dark input[type="text"] {
+  border-color: var(--gregore-border-dark);
+}
+html.light textarea,
+html.light input[type="text"] {
+  border-color: var(--gregore-border-light);
+}
+
+/* Selection color */
+::selection {
+  background: rgba(107, 143, 113, 0.3);
+  color: inherit;
+}
+
+/* Sidebar active item accent */
+html.dark #sidebar-chat-item.bg-gray-100,
+html.dark #sidebar-chat-item[class*="active"],
+html.dark .sidebar-active {
+  background-color: rgba(107, 143, 113, 0.08) !important;
+  border-left: 2px solid var(--gregore-accent);
+}

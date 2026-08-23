@@ -19,6 +19,7 @@ services:
       - WEBUI_SECRET_KEY=${WEBUI_SECRET_KEY:-}
       - ENABLE_PLUGINS=true
       - ENABLE_SIGNUP=false
+      - WEBUI_NAME=Gregore
       - DEFAULT_USER_ROLE=user
       # No Ollama — all LLM calls route through CORTEX
       - ENABLE_OLLAMA_API=false
