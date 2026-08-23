@@ -1,19 +1,49 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <!--
+    GREGORE Favicon — 64px simplified mark
+    Mark in Linen (#FAF8F5) on Greg purple (#5E4B8C) rounded-square.
+    Simplified for legibility at small sizes. Per LOGO_RECOLOR_BRIEF.md (2026-06-18).
+  -->
   <defs>
-    <radialGradient id="glow" cx="50%" cy="50%" r="50%">
-      <stop offset="0%" stop-color="#8aaf91" stop-opacity="0.9"/>
-      <stop offset="60%" stop-color="#6b8f71" stop-opacity="1"/>
-      <stop offset="100%" stop-color="#4a6b50" stop-opacity="1"/>
-    </radialGradient>
-    <radialGradient id="inner" cx="45%" cy="40%" r="45%">
-      <stop offset="0%" stop-color="#a0c4a6" stop-opacity="0.4"/>
-      <stop offset="100%" stop-color="#6b8f71" stop-opacity="0"/>
-    </radialGradient>
+    <clipPath id="favRounded">
+      <rect x="0" y="0" width="64" height="64" rx="14" ry="14"/>
+    </clipPath>
   </defs>
-  <!-- Subtle outer ring -->
-  <circle cx="256" cy="256" r="230" fill="none" stroke="#6b8f71" stroke-width="6" opacity="0.2"/>
-  <!-- Main mark — the breathing dot -->
-  <circle cx="256" cy="256" r="170" fill="url(#glow)"/>
-  <!-- Inner light -->
-  <circle cx="256" cy="256" r="170" fill="url(#inner)"/>
+  <g clip-path="url(#favRounded)">
+    <rect width="64" height="64" fill="#5E4B8C"/>
+  </g>
+  <!-- Simplified mark, centered -->
+  <g transform="translate(13, 13) scale(0.0375)">
+    <path fill="#FAF8F5" fill-rule="evenodd"
+      d="M778 926
+         C774 903.7 770 881.3 766 859
+         C754.7 801.3 743.3 743.7 732 686
+         C729 667.7 726 649.3 723 631
+         C727 620.3 731 609.7 735 599
+         C741.3 578.2 742.1 555.4 746 532
+         c3.3 -19.8 0.1 -45.9 -3 -62
+         c-17.5 -90.7 -51.3 -154.6 -113 -200
+         c-95.7 -70.4 -248.5 -77.6 -324 18
+         c-12.5 15.8 -29.2 34.2 -34 57
+         C302 319.6 322.3 293.4 366 280
+         c40.8 -12.5 92.8 -4.7 127 8
+         c79.7 29.5 173.7 112.6 174 219
+         c-0.7 -0.3 -1.3 -0.7 -2 -1
+         c-25.7 -58.2 -125.7 -115.4 -196 -133
+         c-116.9 -29.2 -216.2 28.4 -236 118
+         c-15.2 68.6 22.6 120.6 50 155
+         c51 63.9 186.9 141.4 310 105
+         c36.6 -10.8 59.6 -29.2 86 -49
+         c0.3 0 0.7 0 1 0
+         c5.9 53.7 48.9 139.7 73 181
+         C761.3 897.3 769.7 911.7 778 926 Z"/>
+    <path fill="#5E4B8C" fill-rule="evenodd"
+      d="M536 710
+         C526.3 709.3 516.7 708.7 507 708
+         C489.7 703.3 472.3 698.7 455 694
+         C403.5 672.9 309.3 603.8 337 524
+         c7 -20.3 17.8 -35.2 34 -46
+         c97.5 -64.9 237.9 28.9 268 99
+         c35.3 82.4 -28 128.9 -103 133 Z"/>
+  </g>
 </svg>
