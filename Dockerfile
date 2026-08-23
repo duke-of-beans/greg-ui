@@ -27,8 +27,8 @@ ARG GID=0
 FROM --platform=$BUILDPLATFORM node:22-alpine3.20 AS build
 ARG BUILD_HASH
 
-# Set Node.js options (heap limit — required for builds on low-RAM hosts like Sentinel)
-ENV NODE_OPTIONS="--max-old-space-size=4096"
+# Set Node.js options (heap — Open WebUI Vite build needs >4GB, 8GB handles GHA runners)
+ENV NODE_OPTIONS="--max-old-space-size=8192"
 
 WORKDIR /app
 
