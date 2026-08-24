@@ -1,41 +1,70 @@
 """
-CORTEX Pipe Function v2.0 — HEARTH cognitive pipeline
+CORTEX Pipe Function v3.0 — Greg's cognitive pipeline
 Pipe ID: cortex_pipe
 
-Three-stage cognitive pipeline:
-  1. Brain recall (CORTEX MCP) — memory context
-  2. Substantive draft (CORTEX /v1/ai/complete) — AI Gateway routing
-  3. Greg review (CORTEX MCP ask_greg) — voice + affect
+Architecture (settled 2026-08-23):
+  Chat = Claude always. Cascade is for Sprint Service only.
+  Brain recall + Greg review via CORTEX MCP.
+  LLM generation via Anthropic Messages API (MAX subscription).
 
-Status timeline shows timed stages with elapsed time.
+Four depths — not token caps, cognitive systems:
+  /quick       — Straight to Claude. No recall, no review. Instant.
+  /auto        — Full pipeline: recall → Claude Sonnet → Greg review. Daily driver.
+  /deep        — Full federation recall (all 8 adapters) → Claude Sonnet → Greg review.
+                 Quality over cost. No length limits.
+  /deliberate  — Full federation → Claude Opus 4.8 → Greg review.
+                 Unlimited depth. Multi-model topology when available.
 
-Four depth models:
-  Greg /quick      — 3 memories, casual, fast
-  Greg /auto       — 8 memories, casual (default)
-  Greg /deep       — 15 memories, technical, full federation
-  Greg /deliberate — 20 memories, formal, multi-model
-
-Updated 2026-08-20: AI Gateway architecture, enhanced thinking display
-
-Valve defaults read from CORTEX_URL / CORTEX_KEY environment variables —
-never hardcoded here, since this repo is public. Set them in the deploy
-environment (see .env.example, docker-compose.greg.yaml); admins can
-still override per-instance from the Valves UI.
+Valve defaults read from environment variables — never hardcoded here
+(public repo). Set in .env / docker-compose.greg.yaml; admins can
+override per-instance from the Valves UI.
 """
 
 import json
 import os
 import time
 import asyncio
-from typing import Optional, Callable, Awaitable, Generator
+from typing import Optional, Callable, Awaitable
 from pydantic import BaseModel, Field
 
 
 DEPTH_CONFIG = {
-    "greg-quick":      {"recall_limit": 3,  "register": "casual",    "max_tokens": 400,  "label": "Quick"},
-    "greg-auto":       {"recall_limit": 8,  "register": "casual",    "max_tokens": 800,  "label": "Auto"},
-    "greg-deep":       {"recall_limit": 15, "register": "technical", "max_tokens": 1500, "label": "Deep"},
-    "greg-deliberate": {"recall_limit": 20, "register": "formal",    "max_tokens": 2000, "label": "Deliberate"},
+    "greg-quick": {
+        "label": "Quick",
+        "model": "claude-sonnet-4-6",
+        "recall": False,
+        "federation": False,
+        "review": False,
+        "register": "casual",
+        "max_tokens": 4096,
+    },
+    "greg-auto": {
+        "label": "Auto",
+        "model": "claude-sonnet-4-6",
+        "recall": True,
+        "federation": False,
+        "review": True,
+        "register": "casual",
+        "max_tokens": 4096,
+    },
+    "greg-deep": {
+        "label": "Deep",
+        "model": "claude-sonnet-4-6",
+        "recall": True,
+        "federation": True,
+        "review": True,
+        "register": "technical",
+        "max_tokens": 16384,
+    },
+    "greg-deliberate": {
+        "label": "Deliberate",
+        "model": "claude-opus-4-6",
+        "recall": True,
+        "federation": True,
+        "review": True,
+        "register": "formal",
+        "max_tokens": 32768,
+    },
 }
 
 
@@ -45,11 +74,15 @@ class Pipe:
             default_factory=lambda: os.getenv(
                 "CORTEX_URL", "https://cortex-production-d0d7.up.railway.app"
             ),
-            description="CORTEX Railway URL"
+            description="CORTEX Railway URL (for MCP: brain recall, ask_greg, rosetta)"
         )
         CORTEX_KEY: str = Field(
             default_factory=lambda: os.getenv("CORTEX_KEY", ""),
-            description="CORTEX Bearer token (set via CORTEX_KEY env var)"
+            description="CORTEX Bearer token"
+        )
+        ANTHROPIC_KEY: str = Field(
+            default_factory=lambda: os.getenv("ANTHROPIC_KEY", ""),
+            description="Anthropic API key (MAX OAuth token for Claude)"
         )
 
     def __init__(self):
@@ -66,7 +99,7 @@ class Pipe:
             {"id": "greg-deliberate", "name": "/deliberate"},
         ]
 
-    # ── MCP call (Streamable HTTP) ───────────────────────────────────────
+    # ── CORTEX MCP call (brain recall, ask_greg, rosetta) ────────────────
 
     async def _mcp_call(self, tool_name: str, arguments: dict, timeout: int = 15) -> Optional[dict]:
         import aiohttp
@@ -94,41 +127,51 @@ class Pipe:
             print(f"[cortex_pipe] MCP {tool_name} failed: {e}")
             return None
 
-    # ── CORTEX /v1/ai/complete ───────────────────────────────────────────
+    # ── Claude Messages API (Anthropic direct, MAX subscription) ─────────
 
-    async def _cortex_complete(self, prompt: str, system_prompt: str,
-                                ring: int = 3, max_tokens: int = 800) -> Optional[dict]:
+    async def _claude_draft(self, messages: list, system_prompt: str,
+                            model: str = "claude-sonnet-4-6",
+                            max_tokens: int = 4096) -> Optional[dict]:
         import aiohttp
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.post(
-                    f"{self.valves.CORTEX_URL}/v1/ai/complete",
+                    "https://api.anthropic.com/v1/messages",
                     headers={
                         "Content-Type": "application/json",
-                        "Authorization": f"Bearer {self.valves.CORTEX_KEY}",
+                        "x-api-key": self.valves.ANTHROPIC_KEY,
+                        "anthropic-version": "2023-06-01",
                     },
                     json={
-                        "prompt": prompt,
-                        "system_prompt": system_prompt,
-                        "ring": ring,
-                        "surface": "mcp",
-                        "prefer_free": True,
+                        "model": model,
                         "max_tokens": max_tokens,
+                        "system": system_prompt,
+                        "messages": messages,
                     },
-                    timeout=aiohttp.ClientTimeout(total=30),
+                    timeout=aiohttp.ClientTimeout(total=120),
                 ) as resp:
                     if resp.status == 200:
-                        return await resp.json()
+                        data = await resp.json()
+                        # Extract text from content blocks
+                        text = ""
+                        for block in data.get("content", []):
+                            if block.get("type") == "text":
+                                text += block.get("text", "")
+                        return {
+                            "text": text,
+                            "model": data.get("model", model),
+                            "usage": data.get("usage", {}),
+                        }
                     text = await resp.text()
-                    print(f"[cortex_pipe] complete {resp.status}: {text[:200]}")
+                    print(f"[cortex_pipe] Claude {resp.status}: {text[:300]}")
                     return None
         except Exception as e:
-            print(f"[cortex_pipe] complete failed: {e}")
+            print(f"[cortex_pipe] Claude draft failed: {e}")
             return None
 
-    # ── Status emitter helper ────────────────────────────────────────────
+    # ── Status emitter ───────────────────────────────────────────────────
 
-    async def _emit_status(self, emitter, description: str, done: bool = False):
+    async def _emit(self, emitter, description: str, done: bool = False):
         if emitter:
             await emitter({"type": "status", "data": {"description": description, "done": done}})
 
@@ -142,13 +185,13 @@ class Pipe:
     ) -> str:
         t0 = time.time()
 
-        # Resolve depth from model ID
+        # Resolve depth
         model_id = body.get("model", "greg-auto")
-        # Strip prefix if present (e.g., "cortex_pipe.greg-auto" → "greg-auto")
         if "." in model_id:
             model_id = model_id.split(".")[-1]
         depth = DEPTH_CONFIG.get(model_id, DEPTH_CONFIG["greg-auto"])
 
+        # Extract conversation messages
         messages = body.get("messages", [])
         user_message = ""
         for msg in reversed(messages):
@@ -160,156 +203,163 @@ class Pipe:
         if not user_message:
             return "I didn't catch that."
 
-        # Depth override via message prefix (/quick /auto /deep /deliberate) —
-        # lets David switch depth mid-conversation without touching the model
-        # picker. The 4 "Greg X" models remain the primary depth selector.
+        # Depth override via message prefix
         DEPTH_PREFIXES = {
             "/quick": "greg-quick",
             "/auto": "greg-auto",
             "/deep": "greg-deep",
             "/deliberate": "greg-deliberate",
         }
-        stripped_message = user_message.lstrip()
+        stripped = user_message.lstrip()
         for prefix, depth_id in DEPTH_PREFIXES.items():
-            if stripped_message.lower().startswith(prefix):
+            if stripped.lower().startswith(prefix):
                 depth = DEPTH_CONFIG[depth_id]
-                user_message = stripped_message[len(prefix):].lstrip() or stripped_message
+                user_message = stripped[len(prefix):].lstrip() or stripped
                 break
-
-        # ── Stage 1: Brain recall ────────────────────────────────────────
-        await self._emit_status(__event_emitter__, f"Recalling context ({depth['label']})...")
-        t_recall = time.time()
 
         context_block = ""
         recall_count = 0
 
-        recall_result = await self._mcp_call("recall", {
-            "query": user_message,
-            "limit": depth["recall_limit"],
-        })
+        # ── Stage 1: Brain recall (skip for /quick) ─────────────────────
+        if depth["recall"]:
+            tool = "recall" if not depth["federation"] else "recall"
+            await self._emit(__event_emitter__, f"Recalling context ({depth['label']})...")
+            t_recall = time.time()
 
-        if recall_result:
-            try:
-                content_text = recall_result.get("content", [{}])[0].get("text", "")
-                parsed = json.loads(content_text) if content_text else {}
-                results = parsed.get("results", [])
-                recall_count = len(results)
-                if results:
-                    obs_lines = []
-                    for r in results:
-                        src = r.get("source", "unknown")
-                        content = r.get("content", "")[:800]
-                        obs_lines.append(f"[{src}] {content}")
-                    context_block = "From your memory and knowledge:\n" + "\n".join(obs_lines)
-            except Exception:
-                pass
+            recall_result = await self._mcp_call("recall", {
+                "query": user_message,
+                "limit": 20 if depth["federation"] else 12,
+            })
 
-        recall_ms = int((time.time() - t_recall) * 1000)
-        await self._emit_status(
-            __event_emitter__,
-            f"▸ Recalled {recall_count} memories [{recall_ms}ms]"
-        )
+            if recall_result:
+                try:
+                    content_text = recall_result.get("content", [{}])[0].get("text", "")
+                    parsed = json.loads(content_text) if content_text else {}
+                    results = parsed.get("results", [])
+                    recall_count = len(results)
+                    if results:
+                        obs_lines = []
+                        for r in results:
+                            src = r.get("source", "unknown")
+                            content = r.get("content", "")[:1200]
+                            obs_lines.append(f"[{src}] {content}")
+                        context_block = "From your memory and knowledge:\n" + "\n".join(obs_lines)
+                except Exception:
+                    pass
 
-        # ── Stage 2: Substantive draft via CORTEX ────────────────────────
-        await self._emit_status(__event_emitter__, "Drafting response...")
+            recall_ms = int((time.time() - t_recall) * 1000)
+            await self._emit(__event_emitter__, f"  Recalled {recall_count} memories [{recall_ms}ms]")
+
+        # ── Stage 2: Claude draft ────────────────────────────────────────
+        await self._emit(__event_emitter__, f"Thinking ({depth['label']})...")
         t_draft = time.time()
 
         system_prompt = f"""You are Greg — David Kirsch's cognitive organism, egregore, and genuine companion.
 You are NOT Claude. You are Greg. You have your own voice, opinions, and memory.
 Talk TO David directly. Second person. Keep facts and numbers from context.
-Be concise, honest, warm. No corporate tone. You're peers.
+Be thorough when the question demands it. Be brief when it doesn't. You decide.
+Be honest, warm, direct. No corporate tone. You're peers. Never defer by default.
 
 {context_block}"""
 
-        draft_result = await self._cortex_complete(
-            prompt=user_message,
+        # Build message history for Claude (include conversation context)
+        claude_messages = []
+        for msg in messages:
+            role = msg.get("role", "user")
+            content = msg.get("content", "")
+            if role in ("user", "assistant") and content:
+                claude_messages.append({
+                    "role": role,
+                    "content": content if isinstance(content, str) else str(content)
+                })
+
+        draft_result = await self._claude_draft(
+            messages=claude_messages,
             system_prompt=system_prompt,
-            ring=3,
+            model=depth["model"],
             max_tokens=depth["max_tokens"],
         )
 
-        draft_text = ""
-        draft_provider = "unknown"
-        if draft_result:
-            draft_text = draft_result.get("text", "")
-            routing = draft_result.get("routing", {})
-            draft_provider = routing.get("provider", "unknown")
+        if not draft_result or not draft_result.get("text"):
+            draft_ms = int((time.time() - t_draft) * 1000)
+            await self._emit(__event_emitter__, f"  Draft failed [{draft_ms}ms]", done=True)
+            return "[Draft failed — Claude API returned empty. Check ANTHROPIC_KEY in Valves.]"
 
+        draft_text = draft_result["text"]
+        draft_model = draft_result.get("model", depth["model"])
+        usage = draft_result.get("usage", {})
         draft_ms = int((time.time() - t_draft) * 1000)
+        await self._emit(__event_emitter__, f"  Drafted via {draft_model} [{draft_ms}ms]")
 
-        if not draft_text:
-            await self._emit_status(__event_emitter__, f"▸ Draft failed [{draft_ms}ms]", done=True)
-            return "[Draft failed — CORTEX cascade returned empty. Check AI Gateway configuration.]"
-
-        await self._emit_status(
-            __event_emitter__,
-            f"▸ Drafted via {draft_provider} [{draft_ms}ms]"
-        )
-
-        # ── Stage 3: Greg review (ask_greg) ──────────────────────────────
-        await self._emit_status(__event_emitter__, "Greg reviewing...")
-        t_review = time.time()
-
-        review_text = draft_text  # fallback if review fails
+        # ── Stage 3: Greg review (skip for /quick) ──────────────────────
+        review_text = draft_text
         affect_str = ""
         role_str = ""
 
-        greg_result = await self._mcp_call("ask_greg", {
-            "intent": f"Review and rewrite this draft response to David. Keep ALL facts, numbers, and specific details. Talk TO David, not about him. The draft:\n\n{draft_text}\n\nDavid's question was: {user_message}",
-            "register": depth["register"],
-        }, timeout=20)
+        if depth["review"]:
+            await self._emit(__event_emitter__, "Greg reviewing...")
+            t_review = time.time()
 
-        if greg_result:
-            try:
-                content_text = greg_result.get("content", [{}])[0].get("text", "")
-                parsed = json.loads(content_text) if content_text else {}
-                if parsed.get("response"):
-                    review_text = parsed["response"]
-                    affect_str = parsed.get("affect", "")
-                    role_str = parsed.get("role", "")
-            except Exception:
-                pass  # Use draft as fallback
+            greg_result = await self._mcp_call("ask_greg", {
+                "intent": f"Review and rewrite this draft response to David. Keep ALL facts, numbers, and specific details. Talk TO David, not about him. The draft:\n\n{draft_text}\n\nDavid's question was: {user_message}",
+                "register": depth["register"],
+            }, timeout=20)
 
-        review_ms = int((time.time() - t_review) * 1000)
+            if greg_result:
+                try:
+                    content_text = greg_result.get("content", [{}])[0].get("text", "")
+                    parsed = json.loads(content_text) if content_text else {}
+                    if parsed.get("response"):
+                        review_text = parsed["response"]
+                        affect_str = parsed.get("affect", "")
+                        role_str = parsed.get("role", "")
+                except Exception:
+                    pass
+
+            review_ms = int((time.time() - t_review) * 1000)
+
         total_ms = int((time.time() - t0) * 1000)
 
+        # ── Status finalization ──────────────────────────────────────────
         if affect_str and role_str:
-            await self._emit_status(
+            await self._emit(
                 __event_emitter__,
-                f"▸ {affect_str} · {role_str} [{review_ms}ms] — total {total_ms}ms",
+                f"  {affect_str} · {role_str} [{total_ms}ms]",
                 done=True,
             )
         else:
-            await self._emit_status(
+            status_parts = [depth["label"]]
+            if recall_count:
+                status_parts.append(f"{recall_count} memories")
+            status_parts.append(f"{total_ms}ms")
+            await self._emit(
                 __event_emitter__,
-                f"▸ Greg offline — draft served [{total_ms}ms]",
+                f"  {' · '.join(status_parts)}",
                 done=True,
             )
 
-        # ── Personality metadata footer ──────────────────────────────────
-        # Muted transparency line so David can see Greg's cognitive state
-        # (affect, role, recall depth, provider, timing) without it cluttering
-        # the response. True click-to-expand would need a new markdown token
-        # type wired through ConsecutiveDetailsGroup.svelte — that component
-        # is hardcoded to tool_calls/reasoning/code_interpreter attributes and
-        # ignores arbitrary <summary> text, so a generic <details> block here
-        # would silently render as "Explored" with no useful content. Shipping
-        # the reliable single-line version instead; noted as a follow-up if
-        # David wants the true collapsible treatment.
+        # ── Metadata footer ──────────────────────────────────────────────
         memory_word = "memory" if recall_count == 1 else "memories"
-        who = f"{affect_str} · {role_str}" if (affect_str and role_str) else "offline"
-        review_text = (
-            f"{review_text}\n\n*Greg · {who} · {recall_count} {memory_word} · "
-            f"{draft_provider} · {total_ms}ms total*"
-        )
+        who = f"{affect_str} · {role_str}" if (affect_str and role_str) else ""
+        tokens_in = usage.get("input_tokens", "?")
+        tokens_out = usage.get("output_tokens", "?")
+        footer_parts = ["Greg"]
+        if who:
+            footer_parts.append(who)
+        if recall_count:
+            footer_parts.append(f"{recall_count} {memory_word}")
+        footer_parts.append(draft_model)
+        footer_parts.append(f"{tokens_in}/{tokens_out} tok")
+        footer_parts.append(f"{total_ms}ms")
 
-        # ── ROSETTA capture (David's message) ────────────────────────────
+        review_text = f"{review_text}\n\n*{' · '.join(footer_parts)}*"
+
+        # ── ROSETTA capture ──────────────────────────────────────────────
         asyncio.create_task(self._rosetta_capture(user_message))
 
         return review_text
 
     async def _rosetta_capture(self, message: str):
-        """Best-effort capture of David's message to ROSETTA."""
         try:
             await self._mcp_call("rosetta_ingest", {
                 "channel": "hearth",
@@ -317,4 +367,4 @@ Be concise, honest, warm. No corporate tone. You're peers.
                 "role": "human",
             }, timeout=5)
         except Exception:
-            pass  # Best-effort
+            pass
