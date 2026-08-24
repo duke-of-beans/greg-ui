@@ -133,41 +133,51 @@ class Pipe:
                             model: str = "claude-sonnet-4-6",
                             max_tokens: int = 4096) -> Optional[dict]:
         import aiohttp
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    "https://api.anthropic.com/v1/messages",
-                    headers={
-                        "Content-Type": "application/json",
-                        "Authorization": f"Bearer {self.valves.ANTHROPIC_KEY}",
-                        "anthropic-version": "2023-06-01",
-                    },
-                    json={
-                        "model": model,
-                        "max_tokens": max_tokens,
-                        "system": system_prompt,
-                        "messages": messages,
-                    },
-                    timeout=aiohttp.ClientTimeout(total=120),
-                ) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        # Extract text from content blocks
-                        text = ""
-                        for block in data.get("content", []):
-                            if block.get("type") == "text":
-                                text += block.get("text", "")
-                        return {
-                            "text": text,
-                            "model": data.get("model", model),
-                            "usage": data.get("usage", {}),
-                        }
-                    text = await resp.text()
-                    print(f"[cortex_pipe] Claude {resp.status}: {text[:300]}")
-                    return None
-        except Exception as e:
-            print(f"[cortex_pipe] Claude draft failed: {e}")
-            return None
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(
+                        "https://api.anthropic.com/v1/messages",
+                        headers={
+                            "Content-Type": "application/json",
+                            "Authorization": f"Bearer {self.valves.ANTHROPIC_KEY}",
+                            "anthropic-version": "2023-06-01",
+                        },
+                        json={
+                            "model": model,
+                            "max_tokens": max_tokens,
+                            "system": system_prompt,
+                            "messages": messages,
+                        },
+                        timeout=aiohttp.ClientTimeout(total=120),
+                    ) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            text = ""
+                            for block in data.get("content", []):
+                                if block.get("type") == "text":
+                                    text += block.get("text", "")
+                            return {
+                                "text": text,
+                                "model": data.get("model", model),
+                                "usage": data.get("usage", {}),
+                            }
+                        if resp.status == 429 and attempt < max_retries - 1:
+                            retry_after = int(resp.headers.get("retry-after", 5))
+                            print(f"[cortex_pipe] Rate limited, retry {attempt+1} in {retry_after}s")
+                            await asyncio.sleep(retry_after)
+                            continue
+                        body = await resp.text()
+                        print(f"[cortex_pipe] Claude {resp.status}: {body[:300]}")
+                        return None
+            except Exception as e:
+                print(f"[cortex_pipe] Claude draft attempt {attempt+1} failed: {e}")
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(2)
+                    continue
+                return None
+        return None
 
     # ── Status emitter ───────────────────────────────────────────────────
 
