@@ -195,6 +195,9 @@ COPY --chown=$UID:$GID ./backend .
 RUN chgrp -R 0 /app/backend/open_webui/static && \
     chmod -R g=u /app/backend/open_webui/static
 
+# Install Node.js + Claude Code CLI for MAX subscription subprocess calls
+RUN apt-get update &&     apt-get install -y --no-install-recommends ca-certificates curl gnupg &&     curl -fsSL https://deb.nodesource.com/setup_22.x | bash - &&     apt-get install -y --no-install-recommends nodejs &&     npm install -g @anthropic-ai/claude-code &&     rm -rf /var/lib/apt/lists/*
+
 EXPOSE 8080
 
 HEALTHCHECK CMD curl --silent --fail http://localhost:${PORT:-8080}/health | jq -ne 'input.status == true' || exit 1
