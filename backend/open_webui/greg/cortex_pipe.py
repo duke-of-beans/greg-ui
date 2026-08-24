@@ -82,7 +82,7 @@ class Pipe:
         )
         ANTHROPIC_KEY: str = Field(
             default_factory=lambda: os.getenv("ANTHROPIC_KEY", ""),
-            description="Anthropic API key (MAX OAuth token for Claude)"
+            description="Claude MAX OAuth token (Bearer auth, draws from MAX subscription)"
         )
 
     def __init__(self):
@@ -139,7 +139,7 @@ class Pipe:
                     "https://api.anthropic.com/v1/messages",
                     headers={
                         "Content-Type": "application/json",
-                        "x-api-key": self.valves.ANTHROPIC_KEY,
+                        "Authorization": f"Bearer {self.valves.ANTHROPIC_KEY}",
                         "anthropic-version": "2023-06-01",
                     },
                     json={
