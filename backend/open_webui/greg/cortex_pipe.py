@@ -150,8 +150,11 @@ class Pipe:
                 full_prompt = f"{system_prompt}\n\nDavid says: {user_msg}"
 
                 env = {**os.environ, "CLAUDE_CODE_OAUTH_TOKEN": oauth_key}
+                cmd = [claude_bin, "--model", model, "--print", full_prompt]
+                if depth.get("label") == "Quick":
+                    cmd = [claude_bin, "--model", model, "--max-turns", "1", "--print", full_prompt]
                 proc = await asyncio.create_subprocess_exec(
-                    claude_bin, "--model", model, "--max-turns", "1", "--print", full_prompt,
+                    *cmd,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                     env=env,
