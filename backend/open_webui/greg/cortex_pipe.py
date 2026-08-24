@@ -132,9 +132,11 @@ class Pipe:
     async def _claude_draft(self, messages: list, system_prompt: str,
                             model: str = "claude-sonnet-4-6",
                             max_tokens: int = 4096) -> Optional[dict]:
+        """Draft via Claude (Bearer OAuth) with CORTEX cascade fallback."""
         import aiohttp
-        max_retries = 3
-        for attempt in range(max_retries):
+
+        # Try Claude via Bearer OAuth first (MAX subscription, $0 marginal)
+        if self.valves.ANTHROPIC_KEY:
             try:
                 async with aiohttp.ClientSession() as session:
                     async with session.post(
@@ -150,7 +152,7 @@ class Pipe:
                             "system": system_prompt,
                             "messages": messages,
                         },
-                        timeout=aiohttp.ClientTimeout(total=120),
+                        timeout=aiohttp.ClientTimeout(total=60),
                     ) as resp:
                         if resp.status == 200:
                             data = await resp.json()
@@ -158,26 +160,44 @@ class Pipe:
                             for block in data.get("content", []):
                                 if block.get("type") == "text":
                                     text += block.get("text", "")
-                            return {
-                                "text": text,
-                                "model": data.get("model", model),
-                                "usage": data.get("usage", {}),
-                            }
-                        if resp.status == 429 and attempt < max_retries - 1:
-                            retry_after = int(resp.headers.get("retry-after", 5))
-                            print(f"[cortex_pipe] Rate limited, retry {attempt+1} in {retry_after}s")
-                            await asyncio.sleep(retry_after)
-                            continue
-                        body = await resp.text()
-                        print(f"[cortex_pipe] Claude {resp.status}: {body[:300]}")
-                        return None
+                            return {"text": text, "model": data.get("model", model), "usage": data.get("usage", {})}
+                        print(f"[cortex_pipe] Claude {resp.status}, falling back to cascade")
             except Exception as e:
-                print(f"[cortex_pipe] Claude draft attempt {attempt+1} failed: {e}")
-                if attempt < max_retries - 1:
-                    await asyncio.sleep(2)
-                    continue
-                return None
-        return None
+                print(f"[cortex_pipe] Claude failed ({e}), falling back to cascade")
+
+        # Fallback: CORTEX /v1/ai/complete (free cascade)
+        try:
+            user_msg = ""
+            for m in reversed(messages):
+                if m.get("role") == "user":
+                    user_msg = m.get("content", "")
+                    break
+            prompt = f"{system_prompt}
+
+User: {user_msg}"
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"{self.valves.CORTEX_URL}/v1/ai/complete",
+                    headers={
+                        "Content-Type": "application/json",
+                        "Authorization": f"Bearer {self.valves.CORTEX_KEY}",
+                    },
+                    json={"prompt": prompt, "ring": 3, "max_tokens": max_tokens},
+                    timeout=aiohttp.ClientTimeout(total=60),
+                ) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        return {
+                            "text": data.get("text", data.get("content", "")),
+                            "model": data.get("model", "cascade"),
+                            "usage": {},
+                        }
+                    body = await resp.text()
+                    print(f"[cortex_pipe] Cascade {resp.status}: {body[:300]}")
+                    return None
+        except Exception as e:
+            print(f"[cortex_pipe] Cascade draft failed: {e}")
+            return None
 
     # ── Status emitter ───────────────────────────────────────────────────
 
