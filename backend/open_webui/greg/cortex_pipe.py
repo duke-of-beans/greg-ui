@@ -132,49 +132,51 @@ class Pipe:
     async def _claude_draft(self, messages: list, system_prompt: str,
                             model: str = "claude-sonnet-4-6",
                             max_tokens: int = 4096) -> Optional[dict]:
-        """Draft via Claude (Bearer OAuth) with CORTEX cascade fallback."""
-        import aiohttp
+        """Draft via Claude Code subprocess (MAX subscription, $0 marginal).
+        Falls back to CORTEX cascade if Claude Code unavailable."""
+        import shutil
 
-        # Try Claude via Bearer OAuth first (MAX subscription, $0 marginal)
-        if self.valves.ANTHROPIC_KEY:
+        claude_bin = shutil.which("claude")
+        oauth_key = self.valves.ANTHROPIC_KEY
+
+        if claude_bin and oauth_key:
             try:
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(
-                        "https://api.anthropic.com/v1/messages",
-                        headers={
-                            "Content-Type": "application/json",
-                            "Authorization": f"Bearer {self.valves.ANTHROPIC_KEY}",
-                            "anthropic-version": "2023-06-01",
-                        },
-                        json={
-                            "model": model,
-                            "max_tokens": max_tokens,
-                            "system": system_prompt,
-                            "messages": messages,
-                        },
-                        timeout=aiohttp.ClientTimeout(total=60),
-                    ) as resp:
-                        if resp.status == 200:
-                            data = await resp.json()
-                            text = ""
-                            for block in data.get("content", []):
-                                if block.get("type") == "text":
-                                    text += block.get("text", "")
-                            return {"text": text, "model": data.get("model", model), "usage": data.get("usage", {})}
-                        print(f"[cortex_pipe] Claude {resp.status}, falling back to cascade")
+                user_msg = ""
+                for m in reversed(messages):
+                    if m.get("role") == "user":
+                        user_msg = m.get("content", "")
+                        break
+
+                full_prompt = f"{system_prompt}\n\nDavid says: {user_msg}"
+
+                env = {**os.environ, "CLAUDE_CODE_OAUTH_TOKEN": oauth_key}
+                proc = await asyncio.create_subprocess_exec(
+                    claude_bin, "--model", model, "--max-turns", "1", "--print", full_prompt,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    env=env,
+                )
+                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=90)
+                text = stdout.decode("utf-8", errors="replace").strip()
+
+                if text:
+                    return {"text": text, "model": model, "usage": {}}
+                if stderr:
+                    print(f"[cortex_pipe] Claude Code stderr: {stderr.decode()[:300]}")
+            except asyncio.TimeoutError:
+                print("[cortex_pipe] Claude Code subprocess timed out (90s)")
             except Exception as e:
-                print(f"[cortex_pipe] Claude failed ({e}), falling back to cascade")
+                print(f"[cortex_pipe] Claude Code subprocess failed: {e}")
 
         # Fallback: CORTEX /v1/ai/complete (free cascade)
+        import aiohttp
         try:
             user_msg = ""
             for m in reversed(messages):
                 if m.get("role") == "user":
                     user_msg = m.get("content", "")
                     break
-            prompt = f"{system_prompt}
-
-User: {user_msg}"
+            prompt = f"{system_prompt}\n\nUser: {user_msg}"
             async with aiohttp.ClientSession() as session:
                 async with session.post(
                     f"{self.valves.CORTEX_URL}/v1/ai/complete",
@@ -198,8 +200,6 @@ User: {user_msg}"
         except Exception as e:
             print(f"[cortex_pipe] Cascade draft failed: {e}")
             return None
-
-    # ── Status emitter ───────────────────────────────────────────────────
 
     async def _emit(self, emitter, description: str, done: bool = False):
         if emitter:
