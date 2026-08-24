@@ -151,15 +151,12 @@ class Pipe:
 
                 env = {**os.environ, "CLAUDE_CODE_OAUTH_TOKEN": oauth_key}
                 proc = await asyncio.create_subprocess_exec(
-                    claude_bin, "--model", model, "--max-turns", "1", "--print", "-",
-                    stdin=asyncio.subprocess.PIPE,
+                    claude_bin, "--model", model, "--max-turns", "1", "--print", full_prompt,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                     env=env,
                 )
-                stdout, stderr = await asyncio.wait_for(
-                    proc.communicate(input=full_prompt.encode("utf-8")), timeout=90
-                )
+                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=90)
                 text = stdout.decode("utf-8", errors="replace").strip()
 
                 if text:
