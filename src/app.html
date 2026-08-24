@@ -60,6 +60,22 @@
 					document.documentElement.style.setProperty('--color-gray-950', '#000000');
 					document.documentElement.classList.add('dark');
 					metaThemeColorTag.setAttribute('content', '#000000');
+				} else if (localStorage.theme === 'gregore-dark') {
+					document.documentElement.style.setProperty('--color-gray-800', '#2a2622');
+					document.documentElement.style.setProperty('--color-gray-850', '#1E1A16');
+					document.documentElement.style.setProperty('--color-gray-900', '#171412');
+					document.documentElement.style.setProperty('--color-gray-950', '#0e0c0a');
+					document.documentElement.classList.add('dark');
+					document.documentElement.classList.add('gregore');
+					metaThemeColorTag.setAttribute('content', '#1E1A16');
+				} else if (localStorage.theme === 'gregore-light') {
+					document.documentElement.style.setProperty('--color-gray-800', '#FAF8F5');
+					document.documentElement.style.setProperty('--color-gray-850', '#F0EBE4');
+					document.documentElement.style.setProperty('--color-gray-900', '#FDFCFA');
+					document.documentElement.style.setProperty('--color-gray-950', '#FFFFFF');
+					document.documentElement.classList.add('light');
+					document.documentElement.classList.add('gregore');
+					metaThemeColorTag.setAttribute('content', '#FAF8F5');
 				} else if (localStorage.theme === 'light') {
 					document.documentElement.classList.add('light');
 					metaThemeColorTag.setAttribute('content', '#ffffff');
@@ -210,6 +226,15 @@
 		#logo-her {
 			display: none;
 		}
+
+		html.gregore.dark #splash-screen {
+			background: #1E1A16;
+		}
+
+		html.gregore.light #splash-screen {
+			background: #FAF8F5;
+		}
+
 
 		#progress-background {
 			display: none;

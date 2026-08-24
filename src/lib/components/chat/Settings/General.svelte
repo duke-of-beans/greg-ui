@@ -17,7 +17,7 @@
 	export let getModels: Function;
 
 	// General
-	let themes = ['dark', 'light', 'oled-dark'];
+	let themes = ['dark', 'light', 'oled-dark', 'gregore'];
 	let selectedTheme = 'system';
 
 	let languages: Awaited<ReturnType<typeof getLanguages>> = [];
@@ -126,7 +126,7 @@
 	});
 
 	const applyTheme = (_theme: string) => {
-		let themeToApply = _theme === 'oled-dark' ? 'dark' : _theme === 'her' ? 'light' : _theme;
+		let themeToApply = _theme === 'oled-dark' ? 'dark' : _theme === 'gregore-dark' ? 'dark' : _theme === 'gregore-light' ? 'light' : _theme === 'her' ? 'light' : _theme;
 
 		if (_theme === 'system') {
 			themeToApply = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
@@ -169,7 +169,11 @@
 							? '#000000'
 							: _theme === 'her'
 								? '#983724'
-								: '#ffffff'
+								: _theme === 'gregore-dark'
+									? '#1E1A16'
+									: _theme === 'gregore-light'
+										? '#FAF8F5'
+										: '#ffffff'
 				);
 			}
 		}
@@ -184,6 +188,24 @@
 			document.documentElement.style.setProperty('--color-gray-900', '#000000');
 			document.documentElement.style.setProperty('--color-gray-950', '#000000');
 			document.documentElement.classList.add('dark');
+		}
+
+		if (_theme === 'gregore-dark') {
+			document.documentElement.style.setProperty('--color-gray-800', '#2a2622');
+			document.documentElement.style.setProperty('--color-gray-850', '#1E1A16');
+			document.documentElement.style.setProperty('--color-gray-900', '#171412');
+			document.documentElement.style.setProperty('--color-gray-950', '#0e0c0a');
+			document.documentElement.classList.add('dark');
+			document.documentElement.classList.add('gregore');
+		}
+
+		if (_theme === 'gregore-light') {
+			document.documentElement.style.setProperty('--color-gray-800', '#FAF8F5');
+			document.documentElement.style.setProperty('--color-gray-850', '#F0EBE4');
+			document.documentElement.style.setProperty('--color-gray-900', '#FDFCFA');
+			document.documentElement.style.setProperty('--color-gray-950', '#FFFFFF');
+			document.documentElement.classList.add('light');
+			document.documentElement.classList.add('gregore');
 		}
 
 		console.log(_theme);
@@ -214,6 +236,8 @@
 					<option value="system">⚙️ {$i18n.t('System')}</option>
 					<option value="dark">🌑 {$i18n.t('Dark')}</option>
 					<option value="oled-dark">🌃 {$i18n.t('OLED Dark')}</option>
+					<option value="gregore-dark">🌀 Gregore Dark</option>
+					<option value="gregore-light">🌀 Gregore Light</option>
 					<option value="light">☀️ {$i18n.t('Light')}</option>
 					{#if $config?.features?.enable_easter_eggs}
 						<option value="her">🌷 Her</option>

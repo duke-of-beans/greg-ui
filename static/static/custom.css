@@ -1,51 +1,83 @@
 /* ============================================================
    Gregore Brand Theme — custom.css
-   Official palette from Logos/README.md (2026-06-18):
+   Activated by .gregore class on <html> (set by theme selector).
+   Works with both gregore-dark and gregore-light base themes.
    
-   Mark:       #5E4B8C (Greg purple)     / #B09AD4 (dark mode)
-   Wordmark:   #3D2B1F (Espresso)        / #F0EBE4 (Light linen)
-   Background: #FAF8F5 (Linen)           / #1E1A16 (Walnut)
-   App icon:   #5E4B8C bg
-   
-   Strategy: accent color swap only. Do NOT override the gray scale —
-   stock Open WebUI contrast is fine, we just replace blue accents
-   with Greg purple and warm up the selection/focus colors.
+   Brand palette (Logos/README.md):
+     Purple:       #5E4B8C (mark)  / #B09AD4 (mark light)
+     Espresso:     #3D2B1F         / #F0EBE4 (light linen)
+     Linen:        #FAF8F5         / #1E1A16 (Walnut)
    ============================================================ */
 
-/* ---- Accent color: blue → Greg purple ---- */
-.bg-blue-500 { background-color: #5E4B8C !important; }
-.bg-blue-600 { background-color: #4d3d78 !important; }
-.bg-blue-700 { background-color: #3d3060 !important; }
-.text-blue-500 { color: #B09AD4 !important; }
-.text-blue-600 { color: #9a82c0 !important; }
-.hover\:bg-blue-600:hover { background-color: #4d3d78 !important; }
-.hover\:bg-blue-700:hover { background-color: #3d3060 !important; }
-.hover\:text-blue-600:hover { color: #9a82c0 !important; }
-.ring-blue-500 { --tw-ring-color: #5E4B8C !important; }
-.focus\:ring-blue-500:focus { --tw-ring-color: #5E4B8C !important; }
-.border-blue-500 { border-color: #5E4B8C !important; }
+/* ---- Accent: blue → Greg purple (both modes) ---- */
+html.gregore .bg-blue-500 { background-color: #5E4B8C !important; }
+html.gregore .bg-blue-600 { background-color: #4d3d78 !important; }
+html.gregore .bg-blue-700 { background-color: #3d3060 !important; }
+html.gregore .text-blue-500 { color: #B09AD4 !important; }
+html.gregore .text-blue-600 { color: #9a82c0 !important; }
+html.gregore .hover\:bg-blue-600:hover { background-color: #4d3d78 !important; }
+html.gregore .hover\:bg-blue-700:hover { background-color: #3d3060 !important; }
+html.gregore .hover\:text-blue-600:hover { color: #9a82c0 !important; }
+html.gregore .ring-blue-500 { --tw-ring-color: #5E4B8C !important; }
+html.gregore .focus\:ring-blue-500:focus { --tw-ring-color: #5E4B8C !important; }
+html.gregore .border-blue-500 { border-color: #5E4B8C !important; }
 
-/* Also catch bg-black button patterns Open WebUI uses */
-button.bg-black { background-color: #5E4B8C !important; }
-button.bg-black:hover { background-color: #4d3d78 !important; }
+/* Primary buttons — Open WebUI uses bg-black for send/action buttons */
+html.gregore.dark button.bg-black,
+html.gregore.dark button.bg-gray-900,
+html.gregore.dark [class*="bg-black"] button {
+  background-color: #5E4B8C !important;
+}
+html.gregore.dark button.bg-black:hover,
+html.gregore.dark button.bg-gray-900:hover {
+  background-color: #4d3d78 !important;
+}
 
-/* ---- Selection color ---- */
-::selection {
+html.gregore.light button.bg-black,
+html.gregore.light button.bg-gray-900 {
+  background-color: #5E4B8C !important;
+}
+html.gregore.light button.bg-black:hover {
+  background-color: #4d3d78 !important;
+}
+
+/* ---- Selection ---- */
+html.gregore ::selection {
   background: rgba(94, 75, 140, 0.3);
   color: inherit;
 }
 
-/* ---- Scrollbar warmth ---- */
-::-webkit-scrollbar {
-  width: 6px;
-}
-::-webkit-scrollbar-thumb {
-  background: rgba(176, 154, 212, 0.25);
+/* ---- Scrollbar ---- */
+html.gregore ::-webkit-scrollbar { width: 6px; }
+html.gregore.dark ::-webkit-scrollbar-thumb {
+  background: rgba(176, 154, 212, 0.2);
   border-radius: 3px;
 }
-::-webkit-scrollbar-thumb:hover {
-  background: rgba(176, 154, 212, 0.4);
+html.gregore.dark ::-webkit-scrollbar-thumb:hover {
+  background: rgba(176, 154, 212, 0.35);
 }
-::-webkit-scrollbar-track {
-  background: transparent;
+html.gregore.light ::-webkit-scrollbar-thumb {
+  background: rgba(94, 75, 140, 0.15);
+  border-radius: 3px;
+}
+html.gregore.light ::-webkit-scrollbar-thumb:hover {
+  background: rgba(94, 75, 140, 0.3);
+}
+html.gregore ::-webkit-scrollbar-track { background: transparent; }
+
+/* ---- Gregore Light: warm input borders ---- */
+html.gregore.light textarea,
+html.gregore.light input[type="text"] {
+  border-color: #e0d3bd;
+}
+
+/* ---- Gregore Dark: warm input borders ---- */
+html.gregore.dark textarea,
+html.gregore.dark input[type="text"] {
+  border-color: #2a2622;
+}
+
+/* ---- Active/focus rings ---- */
+html.gregore *:focus-visible {
+  outline-color: #5E4B8C;
 }
