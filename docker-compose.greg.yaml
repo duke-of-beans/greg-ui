@@ -28,6 +28,8 @@ services:
       # the real value here.
       - CORTEX_URL=${CORTEX_URL:-https://cortex-production-d0d7.up.railway.app/mcp}
       - CORTEX_KEY=${CORTEX_KEY:-}
+      - ANTHROPIC_KEY=${ANTHROPIC_KEY:-}
+      - CLAUDE_CODE_OAUTH_TOKEN=${ANTHROPIC_KEY:-}
       # Home (Railway executor) creds for the /home hearth page's capacity
       # bar, Sprint Control Surface, and cost dashboard (Sprint 10). Set
       # GREG_HOME_API_KEY in Sentinel's .env once Home checks it — see
