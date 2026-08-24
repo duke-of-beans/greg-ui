@@ -330,19 +330,15 @@ Be honest, warm, direct. No corporate tone. You're peers. Never defer by default
             await self._emit(__event_emitter__, "Greg reviewing...")
             t_review = time.time()
 
-            greg_result = await self._mcp_call("ask_greg", {
-                "intent": f"Review and rewrite this draft response to David. Keep ALL facts, numbers, and specific details. Talk TO David, not about him. The draft:\n\n{draft_text}\n\nDavid's question was: {user_message}",
-                "register": depth["register"],
-            }, timeout=20)
+            # Only get affect state — don't rewrite Claude's draft
+            greg_result = await self._mcp_call("affect", {}, timeout=10)
 
             if greg_result:
                 try:
                     content_text = greg_result.get("content", [{}])[0].get("text", "")
                     parsed = json.loads(content_text) if content_text else {}
-                    if parsed.get("response"):
-                        review_text = parsed["response"]
-                        affect_str = parsed.get("affect", "")
-                        role_str = parsed.get("role", "")
+                    affect_str = parsed.get("summary", parsed.get("affect", ""))
+                    role_str = parsed.get("turn_role", parsed.get("role", ""))
                 except Exception:
                     pass
 
