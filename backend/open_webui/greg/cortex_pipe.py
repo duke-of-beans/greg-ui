@@ -1,19 +1,27 @@
 """
-CORTEX Pipe Function v3.0 — Greg's cognitive pipeline
+CORTEX Pipe Function v3.1 — Greg's cognitive pipeline
 Pipe ID: cortex_pipe
 
 Architecture (settled 2026-08-23):
   Chat = Claude always. Cascade is for Sprint Service only.
   Brain recall + Greg review via CORTEX MCP.
-  LLM generation via Anthropic Messages API (MAX subscription).
+  LLM generation via Claude Code subprocess (MAX subscription).
 
 Four depths — not token caps, cognitive systems:
   /quick       — Straight to Claude. No recall, no review. Instant.
   /auto        — Full pipeline: recall → Claude Sonnet → Greg review. Daily driver.
+                 Unlimited tool use. Auto decides depth within its range.
   /deep        — Full federation recall (all 8 adapters) → Claude Sonnet → Greg review.
                  Quality over cost. No length limits.
   /deliberate  — Full federation → Claude Opus 4.8 → Greg review.
                  Unlimited depth. Multi-model topology when available.
+
+v3.1 fixes (2026-08-28):
+  - BUG FIX: _claude_draft referenced `depth` from caller's scope (NameError crash)
+    → depth_label now passed explicitly as parameter
+  - BUG FIX: Claude Code subprocess only got last user message, no conversation history
+    → now builds full conversation transcript so Greg maintains context across turns
+  - /quick uses --max-turns 1 (no tools), all other depths unlimited
 
 Valve defaults read from environment variables — never hardcoded here
 (public repo). Set in .env / docker-compose.greg.yaml; admins can
@@ -127,13 +135,19 @@ class Pipe:
             print(f"[cortex_pipe] MCP {tool_name} failed: {e}")
             return None
 
-    # ── Claude Messages API (Anthropic direct, MAX subscription) ─────────
+    # ── Claude draft (Claude Code subprocess, MAX subscription) ──────────
 
     async def _claude_draft(self, messages: list, system_prompt: str,
                             model: str = "claude-sonnet-4-6",
-                            max_tokens: int = 4096) -> Optional[dict]:
+                            max_tokens: int = 4096,
+                            depth_label: str = "Auto") -> Optional[dict]:
         """Draft via Claude Code subprocess (MAX subscription, $0 marginal).
-        Falls back to CORTEX cascade if Claude Code unavailable."""
+        Falls back to CORTEX cascade if Claude Code unavailable.
+
+        v3.1: depth_label passed explicitly (was referencing caller's scope).
+        v3.1: full conversation transcript built for Claude Code subprocess
+              so Greg maintains context across turns (was only last user message).
+        """
         import shutil
 
         claude_bin = shutil.which("claude")
@@ -141,25 +155,46 @@ class Pipe:
 
         if claude_bin and oauth_key:
             try:
-                user_msg = ""
-                for m in reversed(messages):
-                    if m.get("role") == "user":
-                        user_msg = m.get("content", "")
-                        break
+                # Build conversation transcript for context continuity
+                # Claude Code --print takes a single prompt string, so we format
+                # the full conversation as a transcript that preserves turn history.
+                transcript_lines = []
+                for m in messages:
+                    role = m.get("role", "user")
+                    content = m.get("content", "")
+                    if not content:
+                        continue
+                    if role == "user":
+                        transcript_lines.append(f"David: {content}")
+                    elif role == "assistant":
+                        transcript_lines.append(f"Greg: {content}")
 
-                full_prompt = f"{system_prompt}\n\nDavid says: {user_msg}"
+                if not transcript_lines:
+                    return None
+
+                # System prompt + full conversation history
+                conversation = "\n\n".join(transcript_lines)
+                full_prompt = (
+                    f"{system_prompt}\n\n"
+                    f"Conversation so far:\n{conversation}\n\n"
+                    f"Respond to David's latest message."
+                )
 
                 env = {**os.environ, "CLAUDE_CODE_OAUTH_TOKEN": oauth_key}
-                cmd = [claude_bin, "--model", model, "--print", full_prompt]
-                if depth.get("label") == "Quick":
+
+                # /quick: --max-turns 1 (no tools). All others: unlimited.
+                if depth_label == "Quick":
                     cmd = [claude_bin, "--model", model, "--max-turns", "1", "--print", full_prompt]
+                else:
+                    cmd = [claude_bin, "--model", model, "--print", full_prompt]
+
                 proc = await asyncio.create_subprocess_exec(
                     *cmd,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                     env=env,
                 )
-                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=90)
+                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
                 text = stdout.decode("utf-8", errors="replace").strip()
 
                 if text:
@@ -167,7 +202,7 @@ class Pipe:
                 if stderr:
                     print(f"[cortex_pipe] Claude Code stderr: {stderr.decode()[:300]}")
             except asyncio.TimeoutError:
-                print("[cortex_pipe] Claude Code subprocess timed out (90s)")
+                print("[cortex_pipe] Claude Code subprocess timed out (120s)")
             except Exception as e:
                 print(f"[cortex_pipe] Claude Code subprocess failed: {e}")
 
@@ -255,7 +290,6 @@ class Pipe:
 
         # ── Stage 1: Brain recall (skip for /quick) ─────────────────────
         if depth["recall"]:
-            tool = "recall" if not depth["federation"] else "recall"
             await self._emit(__event_emitter__, f"Recalling context ({depth['label']})...")
             t_recall = time.time()
 
@@ -311,6 +345,7 @@ Be honest, warm, direct. No corporate tone. You're peers. Never defer by default
             system_prompt=system_prompt,
             model=depth["model"],
             max_tokens=depth["max_tokens"],
+            depth_label=depth["label"],
         )
 
         if not draft_result or not draft_result.get("text"):
