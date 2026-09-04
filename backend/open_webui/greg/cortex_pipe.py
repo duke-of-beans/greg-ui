@@ -141,48 +141,104 @@ class Pipe:
                             model: str = "claude-sonnet-4-6",
                             max_tokens: int = 4096,
                             depth_label: str = "Auto") -> Optional[dict]:
-        """Draft via Claude Code subprocess (MAX subscription, $0 marginal).
-        Falls back to CORTEX cascade if Claude Code unavailable.
+        """Draft via gated articulation (ganglion effector, localhost).
+        Falls back to raw Claude Code subprocess if effector unreachable,
+        then to CORTEX cascade if Claude Code unavailable.
 
+        v4.0: Primary path is now POST /articulate on the local effector.
+              The effector spawns claude -p AND gates through POSTCOG.
+              Raw subprocess path preserved as fallback (ungated but alive).
         v3.1: depth_label passed explicitly (was referencing caller's scope).
-        v3.1: full conversation transcript built for Claude Code subprocess
-              so Greg maintains context across turns (was only last user message).
+        v3.1: full conversation transcript for context continuity.
         """
+        import aiohttp
         import shutil
 
+        # Build conversation transcript (shared by both paths)
+        transcript_lines = []
+        for m in messages:
+            role = m.get("role", "user")
+            content = m.get("content", "")
+            if not content:
+                continue
+            if role == "user":
+                transcript_lines.append(f"David: {content}")
+            elif role == "assistant":
+                transcript_lines.append(f"Greg: {content}")
+
+        if not transcript_lines:
+            return None
+
+        conversation = "\n\n".join(transcript_lines)
+        full_prompt = (
+            f"{system_prompt}\n\n"
+            f"Conversation so far:\n{conversation}\n\n"
+            f"Respond to David's latest message."
+        )
+
+        # ── Primary: gated articulation via local effector ──────────────
+        # The effector runs on the same machine as Open WebUI (Sentinel).
+        # POST /articulate is synchronous, sub-ms overhead beyond the
+        # Claude subprocess itself, and the response comes back gated.
+        effector_url = os.getenv("GANGLION_EFFECTOR_URL", "http://localhost:8093")
+        effector_key = self.valves.CORTEX_KEY  # same key
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"{effector_url}/articulate",
+                    headers={
+                        "Content-Type": "application/json",
+                        "Authorization": f"Bearer {effector_key}",
+                    },
+                    json={
+                        "prompt": full_prompt,
+                        "domain": "general",
+                        "max_tokens": max_tokens,
+                    },
+                    timeout=aiohttp.ClientTimeout(total=180),
+                ) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        text = data.get("text", "")
+                        verdict = data.get("verdict", {})
+                        outcome = verdict.get("outcome", "unknown")
+
+                        if outcome == "veto":
+                            veto_kinds = ", ".join(
+                                v.get("kind", "?") for v in verdict.get("vetoes", [])
+                            )
+                            print(f"[cortex_pipe] Gate VETOED: {veto_kinds}")
+                            return {
+                                "text": f"I need to think about this more carefully. [gate: {veto_kinds}]",
+                                "model": model,
+                                "usage": {},
+                                "gated": True,
+                                "verdict": verdict,
+                            }
+
+                        if text:
+                            return {
+                                "text": text,
+                                "model": model,
+                                "usage": {},
+                                "gated": True,
+                                "verdict": verdict,
+                            }
+                    else:
+                        body = await resp.text()
+                        print(f"[cortex_pipe] Effector {resp.status}: {body[:300]}")
+        except Exception as e:
+            print(f"[cortex_pipe] Effector unreachable ({e}), falling back to raw subprocess")
+
+        # ── Fallback: raw Claude Code subprocess (ungated) ──────────────
         claude_bin = shutil.which("claude")
         oauth_key = self.valves.ANTHROPIC_KEY
 
         if claude_bin and oauth_key:
             try:
-                # Build conversation transcript for context continuity
-                # Claude Code --print takes a single prompt string, so we format
-                # the full conversation as a transcript that preserves turn history.
-                transcript_lines = []
-                for m in messages:
-                    role = m.get("role", "user")
-                    content = m.get("content", "")
-                    if not content:
-                        continue
-                    if role == "user":
-                        transcript_lines.append(f"David: {content}")
-                    elif role == "assistant":
-                        transcript_lines.append(f"Greg: {content}")
-
-                if not transcript_lines:
-                    return None
-
-                # System prompt + full conversation history
-                conversation = "\n\n".join(transcript_lines)
-                full_prompt = (
-                    f"{system_prompt}\n\n"
-                    f"Conversation so far:\n{conversation}\n\n"
-                    f"Respond to David's latest message."
-                )
-
                 env = {**os.environ, "CLAUDE_CODE_OAUTH_TOKEN": oauth_key}
 
-                # /quick: --max-turns 1 (no tools). All others: unlimited.
                 if depth_label == "Quick":
                     cmd = [claude_bin, "--model", model, "--max-turns", "1", "--print", full_prompt]
                 else:
@@ -198,7 +254,7 @@ class Pipe:
                 text = stdout.decode("utf-8", errors="replace").strip()
 
                 if text:
-                    return {"text": text, "model": model, "usage": {}}
+                    return {"text": text, "model": model, "usage": {}, "gated": False}
                 if stderr:
                     print(f"[cortex_pipe] Claude Code stderr: {stderr.decode()[:300]}")
             except asyncio.TimeoutError:
@@ -206,8 +262,7 @@ class Pipe:
             except Exception as e:
                 print(f"[cortex_pipe] Claude Code subprocess failed: {e}")
 
-        # Fallback: CORTEX /v1/ai/complete (free cascade)
-        import aiohttp
+        # ── Last resort: CORTEX cascade (ungated) ───────────────────────
         try:
             user_msg = ""
             for m in reversed(messages):
@@ -231,6 +286,7 @@ class Pipe:
                             "text": data.get("text", data.get("content", "")),
                             "model": data.get("model", "cascade"),
                             "usage": {},
+                            "gated": False,
                         }
                     body = await resp.text()
                     print(f"[cortex_pipe] Cascade {resp.status}: {body[:300]}")
