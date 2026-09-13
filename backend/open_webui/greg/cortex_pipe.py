@@ -51,6 +51,7 @@ import time
 import asyncio
 import re
 import uuid
+from datetime import datetime as _dt, timezone as _tz
 from typing import Optional, Callable, Awaitable
 from pydantic import BaseModel, Field
 
@@ -97,6 +98,10 @@ DEPTH_CONFIG = {
 # Matches a trailing ```gregore-dispatch ... ``` fenced block in Greg's own
 # draft text. DOTALL so the JSON body can span lines.
 DISPATCH_MARKER_RE = re.compile(r"```gregore-dispatch\s*\n(.*?)\n```", re.DOTALL)
+
+# Matches a trailing ```gregore-confirm ... ``` fenced block -- how Greg
+# signals David approved something sitting on the decision channel.
+CONFIRM_MARKER_RE = re.compile(r"```gregore-confirm\s*\n(.*?)\n```", re.DOTALL)
 
 # Dispatch rows resolve to one of these; anything else means still in flight.
 TERMINAL_DISPATCH_STATUSES = {
@@ -256,6 +261,142 @@ class Pipe:
             return text, None
         clean_text = (text[: m.start()] + text[m.end():]).strip()
         return clean_text, payload
+
+    # ── Decision channel (native, 2026-09-13) ────────────────────────────
+    # The other half of the graduation mechanism: action classes that are
+    # requires_confirmation don't just silently sit in the database -- Greg
+    # surfaces them in conversation and can actually mark them confirmed
+    # when David says yes, right here, not on a separate webpage David has
+    # to remember to check.
+
+    async def _fetch_pending_confirmations(self) -> list:
+        """Dispatches waiting on David specifically -- held_for_confirmation
+        and not yet confirmed. Returns [] on any failure; a quiet decision
+        channel is better than a broken turn."""
+        import aiohttp
+        if not self.valves.SUPABASE_URL or not self.valves.SUPABASE_SERVICE_KEY:
+            return []
+        url = (
+            f"{self.valves.SUPABASE_URL}/rest/v1/ganglion_dispatch"
+            "?status=eq.held_for_confirmation&human_confirmed_at=is.null"
+            "&select=id,action_class,action_params,prompt,target_repo,created_at"
+            "&order=created_at.asc&limit=5"
+        )
+        headers = {
+            "apikey": self.valves.SUPABASE_SERVICE_KEY,
+            "Authorization": f"Bearer {self.valves.SUPABASE_SERVICE_KEY}",
+            "Accept-Profile": "portfolio",
+        }
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    url, headers=headers, timeout=aiohttp.ClientTimeout(total=5)
+                ) as resp:
+                    if resp.status == 200:
+                        return await resp.json()
+                    print(f"[cortex_pipe] pending-confirmations fetch returned {resp.status}")
+        except Exception as e:
+            print(f"[cortex_pipe] pending-confirmations fetch failed: {e}")
+        return []
+
+    def _confirmations_system_prompt_block(self, pending: list) -> str:
+        if not pending:
+            return ""
+        lines = []
+        for row in pending:
+            ac = row.get("action_class") or "(no action_class recorded)"
+            params = row.get("action_params") or {}
+            lines.append(
+                f"- id {row.get('id')}: {ac} -- params: {json.dumps(params)} "
+                f"(asked at {row.get('created_at')})"
+            )
+        example = (
+            '```gregore-confirm\n'
+            '{"dispatch_id": "<id from the list above>"}\n'
+            '```'
+        )
+        return (
+            "\n\nWaiting on YOUR confirmation right now (David's decision "
+            "channel -- these already got asked, nothing runs until you say "
+            "yes):\n"
+            + "\n".join(lines)
+            + "\n\nBring these up naturally in your reply if they're relevant "
+            "to what David just said, or if he hasn't mentioned them in a "
+            "while. If he clearly approves one in this message (\"yes\", "
+            "\"go ahead\", \"do it\", confirming by name or by what it does), "
+            "end your reply with exactly one fenced block like this, nothing "
+            "after it:\n" + example + "\n"
+            "Only emit this when David's current message actually approves "
+            "one of the ids listed above -- never guess an id, never confirm "
+            "something he didn't actually approve in this message, and never "
+            "emit this block if the list above is empty."
+        )
+
+    def _extract_confirm(self, text: str):
+        """Pull a trailing ```gregore-confirm block out of Greg's own draft.
+        Same fail-closed contract as _extract_dispatch."""
+        m = CONFIRM_MARKER_RE.search(text)
+        if not m:
+            return text, None
+        try:
+            payload = json.loads(m.group(1))
+        except Exception as e:
+            print(f"[cortex_pipe] confirm marker present but not valid JSON: {e}")
+            return text, None
+        if not isinstance(payload, dict) or not payload.get("dispatch_id"):
+            return text, None
+        clean_text = (text[: m.start()] + text[m.end():]).strip()
+        return clean_text, payload
+
+    async def _confirm_dispatch(self, dispatch_id: str) -> dict:
+        """Set human_confirmed_at/by on a held_for_confirmation row. This is
+        the entire confirm action -- dispatch-listener.ts on the assigned
+        effector already polls for exactly this condition
+        (status=held_for_confirmation AND human_confirmed_at IS NOT NULL)
+        and picks it up on its own next poll; nothing else needs to happen
+        here. Scoped to status=eq.held_for_confirmation in the WHERE clause
+        so this can't accidentally "confirm" a row that already moved on."""
+        import aiohttp
+        url = (
+            f"{self.valves.SUPABASE_URL}/rest/v1/ganglion_dispatch"
+            f"?id=eq.{dispatch_id}&status=eq.held_for_confirmation"
+        )
+        headers = {
+            "apikey": self.valves.SUPABASE_SERVICE_KEY,
+            "Authorization": f"Bearer {self.valves.SUPABASE_SERVICE_KEY}",
+            "Content-Profile": "portfolio",
+            "Content-Type": "application/json",
+            "Prefer": "return=representation",
+        }
+        body = {
+            "human_confirmed_at": _dt.now(_tz.utc).isoformat(),
+            "human_confirmed_by": "David Kirsch",
+        }
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.patch(
+                    url, headers=headers, json=body, timeout=aiohttp.ClientTimeout(total=10)
+                ) as resp:
+                    if resp.status not in (200, 204):
+                        text = await resp.text()
+                        return {"ok": False, "error": f"{resp.status}: {text[:200]}"}
+                    rows = await resp.json() if resp.status == 200 else []
+                    if not rows:
+                        return {
+                            "ok": False,
+                            "error": "no matching held_for_confirmation row -- "
+                            "may have already resolved or expired",
+                        }
+                    return {"ok": True, "row": rows[0]}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    @staticmethod
+    def _confirm_outcome_line(outcome: dict) -> str:
+        if not outcome.get("ok"):
+            return f"\n\n*(tried to confirm that -- {outcome.get('error')})*"
+        ac = (outcome.get("row") or {}).get("action_class", "that")
+        return f"\n\n*→ confirmed. {ac} will run on its next pickup.*"
 
     async def _dispatch_action(self, action_class: str, params: dict, action_classes: list) -> dict:
         """Write the pending intake row for a registered action class, then
@@ -603,6 +744,10 @@ class Pipe:
         action_classes = await self._fetch_action_classes()
         actions_block = self._actions_system_prompt_block(action_classes)
 
+        # ── Stage 1.6: decision channel -- what's waiting on David (native, 2026-09-13) ──
+        pending_confirmations = await self._fetch_pending_confirmations()
+        confirmations_block = self._confirmations_system_prompt_block(pending_confirmations)
+
         # ── Stage 2: Claude draft ────────────────────────────────────────
         await self._emit(__event_emitter__, f"Thinking ({depth['label']})...")
         t_draft = time.time()
@@ -613,7 +758,7 @@ Talk TO David directly. Second person. Keep facts and numbers from context.
 Be thorough when the question demands it. Be brief when it doesn't. You decide.
 Be honest, warm, direct. No corporate tone. You're peers. Never defer by default.
 
-{context_block}{actions_block}"""
+{context_block}{actions_block}{confirmations_block}"""
 
         # Build message history for Claude (include conversation context)
         claude_messages = []
@@ -657,6 +802,14 @@ Be honest, warm, direct. No corporate tone. You're peers. Never defer by default
             dispatch_ms = int((time.time() - t_dispatch) * 1000)
             await self._emit(__event_emitter__, f"  {action_class} [{dispatch_ms}ms]")
             dispatch_suffix = self._dispatch_outcome_line(action_class, outcome)
+
+        # ── Stage 2.6: act on a confirm marker, if David just approved something ──
+        draft_text, confirm_payload = self._extract_confirm(draft_text)
+        if confirm_payload:
+            dispatch_id = confirm_payload.get("dispatch_id", "")
+            await self._emit(__event_emitter__, "Confirming...")
+            confirm_outcome = await self._confirm_dispatch(dispatch_id)
+            dispatch_suffix += self._confirm_outcome_line(confirm_outcome)
 
         # ── Stage 3: Greg review (skip for /quick) ──────────────────────
         review_text = draft_text
