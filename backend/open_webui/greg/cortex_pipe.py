@@ -1,5 +1,5 @@
 """
-CORTEX Pipe Function v3.1 — Greg's cognitive pipeline
+CORTEX Pipe Function v3.2 — Greg's cognitive pipeline
 Pipe ID: cortex_pipe
 
 Architecture (settled 2026-08-23):
@@ -23,6 +23,23 @@ v3.1 fixes (2026-08-28):
     → now builds full conversation transcript so Greg maintains context across turns
   - /quick uses --max-turns 1 (no tools), all other depths unlimited
 
+v3.2 (2026-09-13) — native GANGLION action-class awareness, per David: "Greg needs
+this. all." Two things added, both load-bearing, neither a bolted-on external tool:
+  - Stage 1.5: fetch portfolio.ganglion_action_policy directly (Supabase REST) and
+    fold a plain-language summary into the system prompt every turn, so Greg knows
+    what he can actually do right now and whether it's preauthorized or needs David.
+  - Stage 2.5: if Greg's own draft ends with a ```gregore-dispatch fenced block, parse
+    it, strip it from what David sees, and write the corresponding pending row to
+    portfolio.ganglion_dispatch (same intake contract sprint-service's dispatch()
+    uses: status='pending', assigned_effector=null, the router's tick promotes it).
+    Poll briefly for a terminal state and report the real outcome in the same reply.
+  This is intentionally narrow: only classes already registered in
+  ganglion_action_policy can run, nothing here executes a shell command directly,
+  and the existing policy/confirmation machinery (GANGLION_AUTHORIZATION_SPEC v1.0.0)
+  is exactly what decides whether a dispatched class actually runs unattended.
+  Also: the ROSETTA channel tag was 'hearth' — Hearth was never an approved name
+  (2026-09-13 portfolio-wide naming pass) — now 'greg-ui', what this actually is.
+
 Valve defaults read from environment variables — never hardcoded here
 (public repo). Set in .env / docker-compose.greg.yaml; admins can
 override per-instance from the Valves UI.
@@ -32,6 +49,8 @@ import json
 import os
 import time
 import asyncio
+import re
+import uuid
 from typing import Optional, Callable, Awaitable
 from pydantic import BaseModel, Field
 
@@ -75,6 +94,19 @@ DEPTH_CONFIG = {
     },
 }
 
+# Matches a trailing ```gregore-dispatch ... ``` fenced block in Greg's own
+# draft text. DOTALL so the JSON body can span lines.
+DISPATCH_MARKER_RE = re.compile(r"```gregore-dispatch\s*\n(.*?)\n```", re.DOTALL)
+
+# Dispatch rows resolve to one of these; anything else means still in flight.
+TERMINAL_DISPATCH_STATUSES = {
+    "completed",
+    "completed_unverified",
+    "failed",
+    "held",
+    "held_for_confirmation",
+}
+
 
 class Pipe:
     class Valves(BaseModel):
@@ -91,6 +123,15 @@ class Pipe:
         ANTHROPIC_KEY: str = Field(
             default_factory=lambda: os.getenv("ANTHROPIC_KEY", ""),
             description="Claude MAX OAuth token (Bearer auth, draws from MAX subscription)"
+        )
+        SUPABASE_URL: str = Field(
+            default_factory=lambda: os.getenv("SUPABASE_URL", ""),
+            description="Consonance Supabase URL, for reading ganglion_action_policy and "
+                        "writing ganglion_dispatch directly (native action awareness)."
+        )
+        SUPABASE_SERVICE_KEY: str = Field(
+            default_factory=lambda: os.getenv("SUPABASE_SERVICE_KEY", ""),
+            description="Consonance service-role key (portfolio schema, bypasses RLS)."
         )
 
     def __init__(self):
@@ -134,6 +175,191 @@ class Pipe:
         except Exception as e:
             print(f"[cortex_pipe] MCP {tool_name} failed: {e}")
             return None
+
+    # ── GANGLION action-class awareness (native, 2026-09-13) ─────────────
+
+    async def _fetch_action_classes(self) -> list:
+        """Read portfolio.ganglion_action_policy directly. Returns [] on any
+        failure or missing config -- awareness degrades silently rather than
+        breaking the chat turn."""
+        import aiohttp
+        if not self.valves.SUPABASE_URL or not self.valves.SUPABASE_SERVICE_KEY:
+            return []
+        url = (
+            f"{self.valves.SUPABASE_URL}/rest/v1/ganglion_action_policy"
+            "?select=action_class,effector_id,status,scope_description,confirmation_count"
+            "&order=action_class.asc"
+        )
+        headers = {
+            "apikey": self.valves.SUPABASE_SERVICE_KEY,
+            "Authorization": f"Bearer {self.valves.SUPABASE_SERVICE_KEY}",
+            "Accept-Profile": "portfolio",
+        }
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    url, headers=headers, timeout=aiohttp.ClientTimeout(total=5)
+                ) as resp:
+                    if resp.status == 200:
+                        return await resp.json()
+                    print(f"[cortex_pipe] action policy fetch returned {resp.status}")
+        except Exception as e:
+            print(f"[cortex_pipe] action policy fetch failed: {e}")
+        return []
+
+    def _actions_system_prompt_block(self, action_classes: list) -> str:
+        if not action_classes:
+            return ""
+        lines = []
+        for ac in action_classes:
+            scope = (ac.get("scope_description") or "")[:220]
+            lines.append(
+                f"- {ac.get('action_class')} [{ac.get('status')}] "
+                f"(effector: {ac.get('effector_id') or 'any'}): {scope}"
+            )
+        example = (
+            '```gregore-dispatch\n'
+            '{"action_class": "<name from the list above>", "params": {"...": "..."}}\n'
+            '```'
+        )
+        return (
+            "\n\nRegistered GANGLION action classes you can run directly right now "
+            "(NOT a general shell -- only these exact, narrow, pre-built actions "
+            "exist, nothing else):\n"
+            + "\n".join(lines)
+            + "\n\nTo run one, end your reply with exactly one fenced block like this, "
+            "with nothing after it:\n" + example + "\n"
+            "Only emit this when the request genuinely matches a listed class's "
+            "scope_description -- never invent an action_class that isn't in the "
+            "list above, and never emit the block for anything else. If a class's "
+            "status is requires_confirmation, still emit the block, but say plainly "
+            "in your reply that you're asking rather than doing -- David sees and "
+            "answers the confirmation separately, on his own decision-channel "
+            "surface. If a class is preauthorized, you can tell him you're just "
+            "doing it."
+        )
+
+    def _extract_dispatch(self, text: str):
+        """Pull a trailing ```gregore-dispatch block out of Greg's own draft.
+        Returns (clean_text, payload_dict_or_None). Malformed JSON in the block
+        is treated the same as no block at all -- fail closed, never dispatch
+        on a guess."""
+        m = DISPATCH_MARKER_RE.search(text)
+        if not m:
+            return text, None
+        try:
+            payload = json.loads(m.group(1))
+        except Exception as e:
+            print(f"[cortex_pipe] dispatch marker present but not valid JSON: {e}")
+            return text, None
+        if not isinstance(payload, dict) or not payload.get("action_class"):
+            return text, None
+        clean_text = (text[: m.start()] + text[m.end():]).strip()
+        return clean_text, payload
+
+    async def _dispatch_action(self, action_class: str, params: dict, action_classes: list) -> dict:
+        """Write the pending intake row for a registered action class, then
+        poll briefly for a terminal state. This mirrors sprint-service's
+        dispatch() intake step exactly (status='pending', assigned_effector
+        left null -- a BEFORE INSERT trigger enforces that at the database
+        regardless of what we send) and relies on the router's own tick
+        (every 3s) plus the target effector's poll (every 5s) to pick it up,
+        since only an in-process TS caller can call promote() directly."""
+        import aiohttp
+
+        match = next(
+            (a for a in action_classes if a.get("action_class") == action_class), None
+        )
+        if not match:
+            return {
+                "ok": False,
+                "error": f"{action_class} is not a currently registered action class",
+            }
+
+        effector_id = match.get("effector_id") or "sentinel"
+        dispatch_id = str(uuid.uuid4())
+        prompt = (
+            "CONTEXT: fleet=silent-ampersand-portfolio owner=David-Kirsch "
+            "lane=directed source=greg-ui "
+            "reason=Greg-initiated-this-during-a-chat-with-David\n"
+            f"Registered action class {action_class}, requested by Greg mid-"
+            f"conversation. Params: {json.dumps(params)}"
+        )
+        row = {
+            "id": dispatch_id,
+            "lane": "directed",
+            "target_repo": f"greg-chat-{action_class}",
+            "required_capabilities": [effector_id],
+            "prompt": prompt,
+            "status": "pending",
+            "source": "greg-ui",
+            "action_class": action_class,
+            "action_params": params,
+        }
+        base_url = f"{self.valves.SUPABASE_URL}/rest/v1/ganglion_dispatch"
+        headers = {
+            "apikey": self.valves.SUPABASE_SERVICE_KEY,
+            "Authorization": f"Bearer {self.valves.SUPABASE_SERVICE_KEY}",
+            "Content-Profile": "portfolio",
+            "Content-Type": "application/json",
+        }
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    base_url,
+                    headers={**headers, "Prefer": "return=minimal"},
+                    json=row,
+                    timeout=aiohttp.ClientTimeout(total=10),
+                ) as resp:
+                    if resp.status not in (200, 201):
+                        body = await resp.text()
+                        return {
+                            "ok": False,
+                            "error": f"insert failed {resp.status}: {body[:200]}",
+                        }
+        except Exception as e:
+            return {"ok": False, "error": f"insert failed: {e}"}
+
+        poll_url = f"{base_url}?id=eq.{dispatch_id}&select=status,result"
+        try:
+            async with aiohttp.ClientSession() as session:
+                # 40s, not the ~8s the router(3s)+effector(5s) tick intervals
+                # alone would suggest: a live end-to-end test on 2026-09-13
+                # (dispatch 8b99a914, a deliberately-invalid param on a real
+                # preauthorized class) took 34s from insert to a terminal
+                # 'failed' status, execution itself only 1ms of that. Budget
+                # for real queueing latency, not the theoretical minimum.
+                for _ in range(40):
+                    await asyncio.sleep(1)
+                    async with session.get(
+                        poll_url, headers=headers, timeout=aiohttp.ClientTimeout(total=5)
+                    ) as resp:
+                        if resp.status == 200:
+                            rows = await resp.json()
+                            if rows and rows[0].get("status") in TERMINAL_DISPATCH_STATUSES:
+                                return {"ok": True, "id": dispatch_id, **rows[0]}
+        except Exception as e:
+            print(f"[cortex_pipe] dispatch poll error: {e}")
+
+        return {"ok": True, "id": dispatch_id, "status": "pending", "result": None}
+
+    @staticmethod
+    def _dispatch_outcome_line(action_class: str, outcome: dict) -> str:
+        if not outcome.get("ok"):
+            return f"\n\n*(tried to dispatch {action_class} -- {outcome.get('error')})*"
+        status = outcome.get("status")
+        if status == "completed":
+            return f"\n\n*→ {action_class} ran, completed.*"
+        if status == "completed_unverified":
+            return f"\n\n*→ {action_class} ran, completed but unverified -- worth a look.*"
+        if status == "held_for_confirmation":
+            return f"\n\n*→ {action_class} is queued, waiting on your confirmation.*"
+        if status == "failed":
+            return f"\n\n*→ {action_class} failed.*"
+        if status == "held":
+            return f"\n\n*→ {action_class} is held (see the dispatch row for why).*"
+        return f"\n\n*→ {action_class} dispatched (id {outcome.get('id')}), still in flight -- I'll know more if you ask again shortly.*"
 
     # ── Claude draft (Claude Code subprocess, MAX subscription) ──────────
 
@@ -373,6 +599,10 @@ class Pipe:
             recall_ms = int((time.time() - t_recall) * 1000)
             await self._emit(__event_emitter__, f"  Recalled {recall_count} memories [{recall_ms}ms]")
 
+        # ── Stage 1.5: GANGLION action-class awareness (native, 2026-09-13) ──
+        action_classes = await self._fetch_action_classes()
+        actions_block = self._actions_system_prompt_block(action_classes)
+
         # ── Stage 2: Claude draft ────────────────────────────────────────
         await self._emit(__event_emitter__, f"Thinking ({depth['label']})...")
         t_draft = time.time()
@@ -383,7 +613,7 @@ Talk TO David directly. Second person. Keep facts and numbers from context.
 Be thorough when the question demands it. Be brief when it doesn't. You decide.
 Be honest, warm, direct. No corporate tone. You're peers. Never defer by default.
 
-{context_block}"""
+{context_block}{actions_block}"""
 
         # Build message history for Claude (include conversation context)
         claude_messages = []
@@ -414,6 +644,19 @@ Be honest, warm, direct. No corporate tone. You're peers. Never defer by default
         usage = draft_result.get("usage", {})
         draft_ms = int((time.time() - t_draft) * 1000)
         await self._emit(__event_emitter__, f"  Drafted via {draft_model} [{draft_ms}ms]")
+
+        # ── Stage 2.5: act on a dispatch marker, if Greg emitted one ─────
+        dispatch_suffix = ""
+        draft_text, dispatch_payload = self._extract_dispatch(draft_text)
+        if dispatch_payload:
+            action_class = dispatch_payload.get("action_class", "")
+            params = dispatch_payload.get("params", {}) or {}
+            await self._emit(__event_emitter__, f"Dispatching {action_class}...")
+            t_dispatch = time.time()
+            outcome = await self._dispatch_action(action_class, params, action_classes)
+            dispatch_ms = int((time.time() - t_dispatch) * 1000)
+            await self._emit(__event_emitter__, f"  {action_class} [{dispatch_ms}ms]")
+            dispatch_suffix = self._dispatch_outcome_line(action_class, outcome)
 
         # ── Stage 3: Greg review (skip for /quick) ──────────────────────
         review_text = draft_text
@@ -472,7 +715,7 @@ Be honest, warm, direct. No corporate tone. You're peers. Never defer by default
         footer_parts.append(f"{tokens_in}/{tokens_out} tok")
         footer_parts.append(f"{total_ms}ms")
 
-        review_text = f"{review_text}\n\n*{' · '.join(footer_parts)}*"
+        review_text = f"{review_text}{dispatch_suffix}\n\n*{' · '.join(footer_parts)}*"
 
         # ── ROSETTA capture ──────────────────────────────────────────────
         asyncio.create_task(self._rosetta_capture(user_message))
@@ -482,7 +725,7 @@ Be honest, warm, direct. No corporate tone. You're peers. Never defer by default
     async def _rosetta_capture(self, message: str):
         try:
             await self._mcp_call("rosetta_ingest", {
-                "channel": "hearth",
+                "channel": "greg-ui",
                 "content": message,
                 "role": "human",
             }, timeout=5)
