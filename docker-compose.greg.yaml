@@ -15,6 +15,7 @@ services:
       - "3000:8080"
     volumes:
       - open-webui:/app/backend/data
+      - ./backend/open_webui/greg/cortex_pipe.py:/app/backend/open_webui/greg/cortex_pipe.py:ro
     environment:
       - WEBUI_SECRET_KEY=${WEBUI_SECRET_KEY:-}
       - ENABLE_PLUGINS=true
@@ -23,17 +24,30 @@ services:
       - DEFAULT_USER_ROLE=user
       # No Ollama — all LLM calls route through CORTEX
       - ENABLE_OLLAMA_API=false
-      # CORTEX creds for the /home hearth page's backend proxy (greeting,
+      # CORTEX creds for cortex_pipe.py's brain-recall/affect/rosetta MCP
+      # calls, and for the GregLite surface's backend proxy (greeting,
       # thought, journal). Set CORTEX_KEY in Sentinel's .env — never commit
       # the real value here.
       - CORTEX_URL=${CORTEX_URL:-https://cortex-production-d0d7.up.railway.app/mcp}
       - CORTEX_KEY=${CORTEX_KEY:-}
       - ANTHROPIC_KEY=${ANTHROPIC_KEY:-}
+      - GANGLION_EFFECTOR_URL=http://host.docker.internal:8093
       - CLAUDE_CODE_OAUTH_TOKEN=${ANTHROPIC_KEY:-}
-      # Home (Railway executor) creds for the /home hearth page's capacity
-      # bar, Sprint Control Surface, and cost dashboard (Sprint 10). Set
-      # GREG_HOME_API_KEY in Sentinel's .env once Home checks it — see
-      # HOME_CAPACITY_INTEGRATION.md §6b (Home repo).
+      # Consonance Supabase — cortex_pipe.py v3.2 (2026-09-13) reads
+      # portfolio.ganglion_action_policy directly to give Greg native
+      # awareness of registered GANGLION action classes, and writes
+      # portfolio.ganglion_dispatch to actually run one when he asks to.
+      # Set both in Sentinel's .env — never commit the real values here.
+      - SUPABASE_URL=${SUPABASE_URL:-}
+      - SUPABASE_SERVICE_KEY=${SUPABASE_SERVICE_KEY:-}
+      # greg-backend (Railway executor, formerly named "home" -- renamed
+      # 2026-09-13) creds for the GregLite surface's capacity bar, Sprint
+      # Control Surface, and cost dashboard (Sprint 10). Set
+      # GREG_HOME_API_KEY in Sentinel's .env once greg-backend checks it —
+      # see HOME_CAPACITY_INTEGRATION.md §6b (greg-backend repo). Var names
+      # themselves still say HOME -- not yet renamed, tracked separately,
+      # since renaming them here without also checking every place that
+      # reads them risks a silent break rather than a naming fix.
       - GREG_HOME_API_URL=${GREG_HOME_API_URL:-https://executor-production-f8aa.up.railway.app}
       - GREG_HOME_API_KEY=${GREG_HOME_API_KEY:-}
       # TTS via Chatterbox on Sentinel
