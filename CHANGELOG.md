@@ -5269,3 +5269,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Instead of having the previous 1.0.0-alpha.101, we switched to semantic versioning as a way to respect global conventions.
+
+- Verified git.commit-push action class.
