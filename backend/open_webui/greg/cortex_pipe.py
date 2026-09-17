@@ -56,6 +56,37 @@ from typing import Optional, Callable, Awaitable
 from pydantic import BaseModel, Field
 
 
+# ═══ GTIA v4 additions (2026-09-17) ═══
+
+class ThinkingTrace:
+    """Tracks which cognitive systems fire during a turn. Collapsed one-liner in output."""
+    def __init__(self):
+        self._start = time.time()
+        self._systems = []
+        self._timings = {}
+
+    def mark(self, system: str):
+        self._systems.append(system)
+        self._timings[system] = time.time() - self._start
+
+    def render(self) -> str:
+        if not self._systems:
+            return ""
+        elapsed = time.time() - self._start
+        systems_str = " \u00b7 ".join(self._systems)
+        detail_lines = "\n".join(
+            f"  {s}: {self._timings.get(s, 0):.1f}s" for s in self._systems
+        )
+        return (
+            f"\n\n<details><summary>"
+            f"<span style='font-family:monospace;font-size:11px;"
+            f"color:rgba(180,180,180,0.35)'>"
+            f"[{systems_str}] {elapsed:.1f}s</span></summary>"
+            f"<pre style='font-size:10px;color:rgba(180,180,180,0.25);"
+            f"margin:4px 0'>{detail_lines}</pre></details>"
+        )
+
+
 DEPTH_CONFIG = {
     "greg-quick": {
         "label": "Quick",
@@ -675,6 +706,28 @@ class Pipe:
         __event_emitter__: Optional[Callable[..., Awaitable]] = None,
     ) -> str:
         t0 = time.time()
+        trace = ThinkingTrace()
+
+        # ── Stage 0.5: PROACTIVE OPENING (GTIA — new conversations) ═══
+        messages_check = body.get("messages", [])
+        if len(messages_check) <= 1 and self.valves.CORTEX_URL:
+            try:
+                seeds_result = await self._mcp_call("gaps_queue", {"person_id": "david"}, timeout=5)
+                if seeds_result:
+                    seeds_text = seeds_result.get("content", [{}])[0].get("text", "") if seeds_result.get("content") else ""
+                    parsed_seeds = json.loads(seeds_text) if seeds_text else {}
+                    items = parsed_seeds.get("seeds", parsed_seeds.get("result", []))
+                    if isinstance(items, list) and items:
+                        opening = items[0].get("observation", items[0].get("text", ""))
+                        if opening:
+                            sys_prompt = body.get("system", "")
+                            body["system"] = sys_prompt + (
+                                f"\n\nIMPORTANT: You have something to open with. "
+                                f"Start the conversation by offering this — don't impose: {opening}"
+                            )
+                            trace.mark("proactive")
+            except Exception:
+                pass
 
         # Resolve depth
         model_id = body.get("model", "greg-auto")
@@ -739,9 +792,13 @@ class Pipe:
 
             recall_ms = int((time.time() - t_recall) * 1000)
             await self._emit(__event_emitter__, f"  Recalled {recall_count} memories [{recall_ms}ms]")
+            if recall_count > 0:
+                trace.mark("brain.db")
 
         # ── Stage 1.5: GANGLION action-class awareness (native, 2026-09-13) ──
         action_classes = await self._fetch_action_classes()
+        if action_classes:
+            trace.mark("ganglion")
         actions_block = self._actions_system_prompt_block(action_classes)
 
         # ── Stage 1.6: decision channel -- what's waiting on David (native, 2026-09-13) ──
@@ -789,6 +846,7 @@ Be honest, warm, direct. No corporate tone. You're peers. Never defer by default
         usage = draft_result.get("usage", {})
         draft_ms = int((time.time() - t_draft) * 1000)
         await self._emit(__event_emitter__, f"  Drafted via {draft_model} [{draft_ms}ms]")
+        trace.mark(draft_model.split("-")[0] if "-" in draft_model else "claude")
 
         # ── Stage 2.5: act on a dispatch marker, if Greg emitted one ─────
         dispatch_suffix = ""
@@ -810,6 +868,55 @@ Be honest, warm, direct. No corporate tone. You're peers. Never defer by default
             await self._emit(__event_emitter__, "Confirming...")
             confirm_outcome = await self._confirm_dispatch(dispatch_id)
             dispatch_suffix += self._confirm_outcome_line(confirm_outcome)
+
+        # ── Stage 2.7: WHETSTONE inline (GTIA) ═══════════════════════════
+        if context_block and draft_text:
+            trace.mark("whetstone")
+            whet_sentences = re.split(r'(?<=[.!?])\s+', draft_text)
+            whet_challenges = []
+            for ws in whet_sentences:
+                if re.search(r'\b\d{4}\b|\b\d+%|\$\d+|\b\d+\.\d+\b', ws):
+                    wt = re.findall(r'\b[A-Z][a-z]+\b|\b\d+\b', ws)
+                    grounded = any(t.lower() in context_block.lower() for t in wt if len(t) > 3)
+                    if not grounded and wt:
+                        whet_challenges.append(ws[:80])
+            if whet_challenges:
+                draft_text += "\n\n---\n*Self-check — claims to verify:*\n"
+                for wc in whet_challenges[:3]:
+                    draft_text += f"\u2022 {wc}...\n"
+
+        # ── Stage 2.8: AUTHORITY GRADUATION (GTIA) ══════════════════════
+        if self.valves.SUPABASE_URL and self.valves.SUPABASE_SERVICE_KEY:
+            try:
+                grad_headers = {
+                    "apikey": self.valves.SUPABASE_SERVICE_KEY,
+                    "Authorization": f"Bearer {self.valves.SUPABASE_SERVICE_KEY}",
+                    "Accept-Profile": "portfolio",
+                }
+                import aiohttp
+                async with aiohttp.ClientSession() as _gs:
+                    async with _gs.get(
+                        f"{self.valves.SUPABASE_URL}/rest/v1/ganglion_action_policy"
+                        "?select=action_class,effector_id,confirmation_count,scope_description"
+                        "&requires_confirmation=eq.true"
+                        "&confirmation_count=gte.5"
+                        "&limit=1",
+                        headers=grad_headers,
+                        timeout=aiohttp.ClientTimeout(total=3),
+                    ) as _gr:
+                        if _gr.status == 200:
+                            _gc = await _gr.json()
+                            if _gc and isinstance(_gc, list) and _gc:
+                                c = _gc[0]
+                                trace.mark("graduation")
+                                draft_text += (
+                                    f"\n\n---\n"
+                                    f"You've confirmed `{c['action_class']}` on "
+                                    f"`{c['effector_id']}` {c['confirmation_count']} times. "
+                                    f"Want me to preauthorize it?"
+                                )
+            except Exception:
+                pass
 
         # ── Stage 3: Greg review (skip for /quick) ──────────────────────
         review_text = draft_text
@@ -868,7 +975,7 @@ Be honest, warm, direct. No corporate tone. You're peers. Never defer by default
         footer_parts.append(f"{tokens_in}/{tokens_out} tok")
         footer_parts.append(f"{total_ms}ms")
 
-        review_text = f"{review_text}{dispatch_suffix}\n\n*{' · '.join(footer_parts)}*"
+        review_text = f"{review_text}{dispatch_suffix}{trace.render()}\n\n*{' · '.join(footer_parts)}*"
 
         # ── ROSETTA capture ──────────────────────────────────────────────
         asyncio.create_task(self._rosetta_capture(user_message))
