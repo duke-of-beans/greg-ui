@@ -26,6 +26,39 @@ v5.0's provider chain (_try_cascade / _try_furnace / _try_effector) is
 UNCHANGED and lives entirely inside stage 4 - this is additive structure
 around it, not a rewrite of the parts that already work.
 
+v6.8 FIX (2026-09-26, Task #47 follow-up, nineteenth pass): the
+PRIVATE LANE (_handle_private, "Greg /Private" sub-pipe) had two
+real bugs, found while answering "does greg-private actually work"
+after a live test returned the all-offline message. (1) The "g7"
+entry in _PRIVATE_ENDPOINTS pointed at "http://localhost:11434" -
+wrong on its face, since this code runs on Sentinel, so "localhost"
+only ever meant Sentinel itself, never the separate physical G7
+machine. Fixed to G7's actual Tailscale IP (100.68.158.12,
+confirmed live via `tailscale status` on G7 - Ollama is installed
+there, D:/Ollama/ollama.exe, but not currently running as a
+service). (2) Furnace was confirmed genuinely offline (Tailscale
+itself showed "offline, last seen 4h ago"), and the private lane
+never attempted to wake it, even though Sentinel's own local
+cortex.service already has a working /v1/furnace/wake (the
+thirteenth-pass fix, confirmed deployed - /opt/cortex's
+.deployed_sha matches origin/main exactly, zero drift). Added
+_wake_furnace_local(), a best-effort call to that LOCAL endpoint
+(never Railway - stays inside this lane's stated "nothing leaves
+Sentinel/LAN" invariant) fired only when the Furnace health check
+itself just failed, reusing the same _cortex_auth_headers() this
+file already sends everywhere else. If Sentinel's local
+CORTEX_API_KEY differs from this pipe's configured valve, this
+gets a 401 and returns False - no worse than before. The final
+offline message now says plainly whether a wake signal actually
+went out, instead of just reporting unreachable with no recourse.
+New valves: ENABLE_PRIVATE_FURNACE_WAKE (default True),
+LOCAL_CORTEX_URL (default http://localhost:8090). Not yet
+field-verified end-to-end (a real wake-from-suspend round trip)
+- that needs a live test with Furnace actually asleep, which is
+the state it happened to be in when this was written, but the
+test itself has not been separately re-run against this exact
+patch.
+
 v6.6 FIX (2026-09-25, CANON Sec7.0 step 3, eighteenth pass): gives this
 speech path (surface "greg-ui" - David's actual daily driver, the one
 that never routed through gregThink's Stage 6) the same hands Stage 6
@@ -177,7 +210,7 @@ from typing import Optional
 import aiohttp
 from pydantic import BaseModel
 
-VERSION = "6.7"
+VERSION = "6.8"
 _SM_PATH = "/home/david/greg-ui/ops-context/GREG_SELF_MODEL.md"
 
 OFFLINE_MSG = (
@@ -393,6 +426,14 @@ class Pipe:
         FURNACE_URL: str = "http://localhost:11434"
         FURNACE_MODEL: str = "llama3:8b"
         FURNACE_TIMEOUT: int = 60
+        # v6.8 (2026-09-26): PRIVATE LANE Furnace-wake integration.
+        # LOCAL_CORTEX_URL is deliberately separate from CORTEX_URL
+        # above (which points at Railway) - the private lane must
+        # never call out to Railway, only Sentinel's own local
+        # cortex.service, to preserve its "nothing leaves Sentinel/
+        # LAN" guarantee.
+        ENABLE_PRIVATE_FURNACE_WAKE: bool = True
+        LOCAL_CORTEX_URL: str = "http://localhost:8090"
         # Claude subprocess
         ANTHROPIC_KEY: str = ""
         EFFECTOR_TIMEOUT: int = 120
@@ -1133,9 +1174,44 @@ class Pipe:
 
     _PRIVATE_ENDPOINTS: tuple[tuple[str, str], ...] = (
         ("furnace", "http://100.85.184.84:11434"),
-        ("g7", "http://localhost:11434"),
+        # v6.8 (2026-09-26): was "http://localhost:11434" - always
+        # meant Sentinel itself (where this code runs), never G7,
+        # a separate physical machine. Fixed to G7's actual
+        # Tailscale IP (hostname "dkpc" in the tailnet). Ollama is
+        # installed there but not confirmed running as of this fix.
+        ("g7", "http://100.68.158.12:11434"),
     )
     _PRIVATE_MODELS: tuple[str, ...] = ("hermes3:8b", "dolphin3:8b")
+
+    async def _wake_furnace_local(self) -> bool:
+        """v6.8 (2026-09-26): best-effort Furnace wake, fired only
+        when the private lane's own Furnace health check just failed.
+        Calls SENTINEL'S OWN local cortex.service
+        (self.valves.LOCAL_CORTEX_URL, default http://localhost:8090)
+        - never Railway - so this stays inside the private lane's
+        stated invariant that nothing here leaves Sentinel/LAN.
+        Reuses the same auth headers already sent to the Railway
+        CORTEX_URL elsewhere in this file; if Sentinel's local
+        CORTEX_API_KEY differs from the one configured in this
+        pipe's CORTEX_API_KEY valve, this simply gets a 401 and
+        returns False - no worse than today's behavior, same
+        fail-soft guarantee as every other addition to this file.
+        Returns True only on a real 200."""
+        if not self.valves.ENABLE_PRIVATE_FURNACE_WAKE:
+            return False
+        try:
+            async with aiohttp.ClientSession() as sess:
+                async with sess.post(
+                    f"{self.valves.LOCAL_CORTEX_URL}/v1/furnace/wake",
+                    headers=self._cortex_auth_headers(),
+                    timeout=aiohttp.ClientTimeout(total=5),
+                ) as resp:
+                    ok = resp.status == 200
+                    print(f"[cortex_pipe] private: furnace wake trigger -> HTTP {resp.status}")
+                    return ok
+        except Exception as exc:
+            print(f"[cortex_pipe] private: furnace wake trigger failed: {exc}")
+            return False
 
     async def _handle_private(
         self, user_message: str, messages: list[dict]
@@ -1146,6 +1222,8 @@ class Pipe:
             if (c := self._extract_message_text(m))
         ]
         ollama_messages.append({"role": "user", "content": user_message})
+
+        furnace_wake_sent = False
 
         for node_name, base_url in self._PRIVATE_ENDPOINTS:
             try:
@@ -1190,14 +1268,25 @@ class Pipe:
                         print(f"[cortex_pipe] private non-prose on {node_name}: {text[:100]!r}")
             except asyncio.TimeoutError:
                 print(f"[cortex_pipe] private: {node_name} timeout")
+                if node_name == "furnace":
+                    furnace_wake_sent = await self._wake_furnace_local()
                 continue
             except aiohttp.ClientConnectorError:
                 print(f"[cortex_pipe] private: {node_name} unreachable")
+                if node_name == "furnace":
+                    furnace_wake_sent = await self._wake_furnace_local()
                 continue
             except Exception as exc:
                 print(f"[cortex_pipe] private error on {node_name}: {exc}")
                 continue
 
+        if furnace_wake_sent:
+            return (
+                "[Greg /Private] Furnace was asleep, so I just sent it a wake "
+                "signal - give it 30-60 seconds and ask again. G7 Ollama is "
+                "also unreachable right now. Nothing left this network; this "
+                "message was not sent anywhere."
+            )
         return (
             "[Greg /Private] All local inference nodes are offline - "
             "Furnace and G7 Ollama are both unreachable right now. "
