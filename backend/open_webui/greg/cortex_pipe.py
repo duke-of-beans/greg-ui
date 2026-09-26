@@ -1,5 +1,5 @@
 """
-cortex_pipe.py  v6.3  (2026-09-23)
+cortex_pipe.py  v6.7  (2026-09-25)
 Greg routing brain - ARCHITECTURAL INVERSION: 7-stage deterministic pipeline.
 
 "The brain calls reasoning. Reasoning does not run the brain."
@@ -25,6 +25,66 @@ and only when stage 3 (classify) decides the message actually needs one.
 v5.0's provider chain (_try_cascade / _try_furnace / _try_effector) is
 UNCHANGED and lives entirely inside stage 4 - this is additive structure
 around it, not a rewrite of the parts that already work.
+
+v6.6 FIX (2026-09-25, CANON Sec7.0 step 3, eighteenth pass): gives this
+speech path (surface "greg-ui" - David's actual daily driver, the one
+that never routed through gregThink's Stage 6) the same hands Stage 6
+has had for a while: read_file, write_file, run_command, git_op,
+query_db (effector-tools.ts, POSTCOG-gated per tool kind, path-sandboxed
+to ALLOWED_ROOTS, destructive-keyword hard-blocked regardless of score).
+This was a wiring gap, not a missing-capability gap - the tools already
+existed and were already hardened, just never offered to this path.
+_try_cascade's POST to /v1/ai/complete now sends one new field,
+enable_effector_tools, sourced from the new ENABLE_EFFECTOR_TOOLS valve
+(default True - David's call, 2026-09-25: this is Greg's first-ever
+standing side-effectful capability on his daily surface, so the default
+was a direct AskUserQuestion rather than an assumption, per Sec10's own
+"confident answer built on incomplete context" caution). CORTEX-side:
+ai-complete.ts's existing tool-use branch (Gregore-private commit
+10ef9e4) folds EFFECTOR_VERB_TOOLS in additively when this flag is set,
+and its single tool-use round became a bounded 5-turn loop so compound
+tasks (read, then edit, then run tests) can finish in one exchange
+instead of dangling after the first. Nothing else in this stage changes:
+same URL, same timeout, same response parsing (data.get("text") already
+picks up whatever the tool-use branch returns, unchanged since v6.4),
+same fallback chain below on any failure. One new field, one new valve,
+same guarantee as every other change this pass has made - the system
+never gets worse than it is today if this misbehaves; flip
+ENABLE_EFFECTOR_TOOLS to False to fully revert this pipe's behavior
+without touching the CORTEX side at all (the flag defaults to absent
+there too, so nothing sends it, nothing changes).
+
+v6.5 FIX (2026-09-25, CANON Sec7.0 Phase 2 step 8, "Waking Mind" Layer 1):
+wires the already-built GET /v1/session/bootstrap endpoint (Gregore-private,
+commit 47c21d1) into this pipeline for the first time - previously the
+endpoint existed but nothing ever called it. Stage 1 (intake) now computes
+a deterministic is_session_start flag (len(messages) <= 1 - no new state
+needed, since Open WebUI already hands this file the full turn history
+every call). Stage 2 (enrich) fetches the bootstrap payload ONLY on that
+flag, in parallel with the other adapters, same fail-soft discipline as
+everything else in this stage. Stage 3's _build_system() injects the
+formatted result first, ahead of the self-model block, since it's broad
+session orientation rather than topic-specific context.
+NOT implemented: CANON Sec2.3 Layer 1 also specs a second gate condition,
+"time-since-last-message > threshold", for re-briefing a conversation
+that went idle without starting a new thread. That needs persisted
+last-message-time state this file has no clean source for yet - shipping
+the deterministic half now rather than bolting on an unverified timer.
+
+v6.4 FIX (2026-09-25, CANON Sec7.0 Phase 0 step 1): _beliefs_absorb (stage
+6/absorb) keyed every belief to one static subject, "greg-ui-exchange" -
+27 rows had piled up under it, 21 of them Open WebUI's own internal RAG/
+title/tag/search-query task prompts and Greg's own OFFLINE_MSG fallback,
+never anything David actually said or Greg actually answered (cleaned up
+this same date: 21 deleted as noise, 6 archived as real content under
+greg-ui-exchange-archived-20260925). Two fixes so it doesn't re-pollute:
+(1) subject is now dynamic - _derive_belief_subject prefers the
+portfolio entities stage 1 (intake) already detected in the message
+("greg-ui:cortex"), falling back to message_type when none matched;
+(2) _is_noise_exchange filters the same three markers the cleanup SQL
+used (### Task:, I am offline, generating search queries) BEFORE the
+network call, so noise stops accumulating at the source instead of
+needing another cleanup pass.
 
 v6.3 FIX (2026-09-23): All CORTEX routes verified against live MCP tool
 schemas. Fixed: /v1/memory/recall -> /v1/recall, /v1/beliefs/query ->
@@ -117,7 +177,7 @@ from typing import Optional
 import aiohttp
 from pydantic import BaseModel
 
-VERSION = "6.3"
+VERSION = "6.7"
 _SM_PATH = "/home/david/greg-ui/ops-context/GREG_SELF_MODEL.md"
 
 OFFLINE_MSG = (
@@ -163,6 +223,39 @@ _PORTFOLIO_ENTITIES = (
     "rosetta", "nightshift", "seeking", "imprint", "treg", "yuma",
     "shim", "vigil", "throwbak", "g7", "m3",
 )
+
+# v6.4 (2026-09-25, CANON Sec7.0 Phase 0 step 1): markers identifying an
+# exchange as machine noise rather than a real David<->Greg turn - Open
+# WebUI's own internal RAG/title/tag/search-query task prompts (arrive as
+# user_message, not anything David said), and Greg's own OFFLINE_MSG
+# fallback echoed back as if it were a real answer. Same three markers
+# the 2026-09-25 beliefs-table cleanup used to identify 21 noise rows
+# after the fact (27 total under the old static subject, 6 archived as
+# real content) - this stops it accumulating again at the source.
+_BELIEF_NOISE_MARKERS = (
+    "### Task:",
+    "I am offline",
+    "generating search queries",
+)
+
+
+def _is_noise_exchange(user_message: str, response: str) -> bool:
+    """True if this exchange is machine noise, not a real David<->Greg
+    turn, and should never be absorbed into beliefs."""
+    combined = f"{user_message}\n{response}"
+    return any(marker in combined for marker in _BELIEF_NOISE_MARKERS)
+
+
+def _derive_belief_subject(intake: Intake) -> str:
+    """Dynamic belief subject, replacing the static "greg-ui-exchange"
+    every belief used to be keyed to. Prefers portfolio entities actually
+    mentioned (stage 1 intake.entities) so beliefs are searchable by what
+    they're about ("greg-ui:cortex", "greg-ui:cortex+ganglion"); falls
+    back to the message type when no known entity was mentioned."""
+    if intake.entities:
+        return "greg-ui:" + "+".join(sorted(set(intake.entities))[:2])
+    return f"greg-ui:{intake.message_type}"
+
 
 _STATUS_QUERY_RE = re.compile(
     r"\b(status|health|up|down|working|broken|online|offline)\b.{0,20}"
@@ -257,6 +350,7 @@ class Intake:
     max_tokens: int = 4096
     base_system: str = ""
     history_tail: str = ""
+    is_session_start: bool = False
 
 
 @dataclass
@@ -268,6 +362,8 @@ class Enriched:
     action_classes: str = ""
     whetstone_frame: str = _WHETSTONE
     self_model: str = ""
+    session_bootstrap: str = ""
+    constitutional_rules: list = field(default_factory=list)  # v6.7
 
 
 @dataclass
@@ -315,6 +411,15 @@ class Pipe:
         ENABLE_PROACTIVE_SEEDS: bool = True
         ENABLE_ABSORB: bool = True
         ENABLE_CLASSIFY_SHORT_CIRCUIT: bool = True
+        ENABLE_SESSION_BOOTSTRAP: bool = True
+        # v6.6 (CANON Sec7.0 step 3, eighteenth pass): Greg's hands on this
+        # speech path - read_file/write_file/run_command/git_op/query_db,
+        # via ai-complete.ts's tool-use branch (already POSTCOG-gated and
+        # path-sandboxed there, see effector-tools.ts - nothing new to gate
+        # on this side). Default True per David's explicit choice, this
+        # same pass: first standing side-effectful capability on his daily
+        # surface, so the default was asked rather than assumed.
+        ENABLE_EFFECTOR_TOOLS: bool = True
         # Supabase (GANGLION action classes)
         SUPABASE_URL: str = "https://zdmxqzkqutizehynqojk.supabase.co"
         SUPABASE_KEY: str = ""
@@ -322,6 +427,8 @@ class Pipe:
     def __init__(self) -> None:
         self.valves = self.Valves()
         self.name = "Greg"
+        self._turn_count: int = 0  # v6.7: frequency gate for seed injection
+        self._constitutional_rules: list | None = None  # v6.7: cached constitutional rules
 
     def _cortex_auth_headers(self) -> dict:
         """Auth headers for all CORTEX API calls."""
@@ -387,6 +494,16 @@ class Pipe:
         depth_label, claude_model, max_tokens = self._depth_config(model_id)
         base_system = body.get("system", "")
 
+        # v6.5 (CANON Sec7.0 Phase 2 step 8): session-start gate, half of
+        # the two-condition design in CANON Sec2.3 Layer 1 ("first message
+        # of a conversation, OR time-since-last-message > threshold").
+        # Only the first half is implemented - deterministic, needs no new
+        # state (messages is already the full turn history Open WebUI
+        # hands us every call). A staleness timer needs persisted
+        # last-message-time somewhere and is deliberately left open rather
+        # than bolted on half-verified.
+        is_session_start = len(messages) <= 1
+
         msg_lower = user_message.lower()
         entities = [e for e in _PORTFOLIO_ENTITIES if e in msg_lower]
 
@@ -424,6 +541,7 @@ class Pipe:
             max_tokens=max_tokens,
             base_system=base_system,
             history_tail=history_tail,
+            is_session_start=is_session_start,
         )
 
     def _depth_config(self, model_id: str) -> tuple[str, str, int]:
@@ -502,13 +620,19 @@ class Pipe:
             print(f"[cortex_pipe] action_classes fetch failed: {exc}")
             return ""
 
-    async def _cortex_recall(self, query: str) -> str:
+    async def _cortex_recall(self, query: str, entities: list[str] | None = None) -> str:
         url = f"{self.valves.CORTEX_URL}/v1/recall"
         try:
+            payload: dict = {"query": query[:500], "ring": 0, "limit": 5}
+            # v6.7 (CANON Sec7.0 step 9): pass extracted entities so recall
+            # can expand beyond literal keying. CORTEX's unifiedRecall() fires
+            # supplementary queries per entity, merges by composite score.
+            if entities:
+                payload["entities"] = entities[:10]
             async with aiohttp.ClientSession() as sess:
                 async with sess.post(
                     url,
-                    json={"query": query[:500], "ring": 0, "limit": 5},
+                    json=payload,
                     headers=self._cortex_auth_headers(),
                     timeout=aiohttp.ClientTimeout(total=self.valves.ENRICH_TIMEOUT),
                 ) as resp:
@@ -576,19 +700,126 @@ class Pipe:
             print(f"[cortex_pipe] gaps fetch failed (route may need correction): {exc}")
             return ""
 
+    async def _fetch_constitutional_rules(self) -> list:
+        """v6.7 (CANON Sec7.0 step 11): Fetch the 12 constitutional rules
+        from CORTEX. Cached after first successful call - these are immutable
+        principles, no need to re-fetch every turn."""
+        if self._constitutional_rules is not None:
+            return self._constitutional_rules
+        try:
+            url = f"{self.valves.CORTEX_URL}/v1/gate/constitutional"
+            async with aiohttp.ClientSession() as sess:
+                async with sess.post(
+                    url,
+                    json={"claims": []},
+                    headers=self._cortex_auth_headers(),
+                    timeout=aiohttp.ClientTimeout(total=self.valves.ENRICH_TIMEOUT),
+                ) as resp:
+                    if resp.status != 200:
+                        self._constitutional_rules = []
+                        return []
+                    data = await resp.json()
+                    self._constitutional_rules = data.get("rules", [])
+                    print(f"[cortex_pipe] constitutional rules cached: {len(self._constitutional_rules)}")
+                    return self._constitutional_rules
+        except Exception as exc:
+            print(f"[cortex_pipe] constitutional rules fetch failed: {exc}")
+            self._constitutional_rules = []
+            return []
+
+    async def _cortex_session_bootstrap(self) -> str:
+        """v6.5 (CANON Sec7.0 Phase 2 step 8, "Waking Mind" Layer 1).
+        Best-effort: session-opening briefing from GET /v1/session/bootstrap.
+        Only called on session start (see _enrich / intake.is_session_start).
+        Soft-fails to '' - a missing briefing degrades context, it never
+        breaks the turn."""
+        url = f"{self.valves.CORTEX_URL}/v1/session/bootstrap"
+        try:
+            async with aiohttp.ClientSession() as sess:
+                async with sess.get(
+                    url,
+                    headers=self._cortex_auth_headers(),
+                    timeout=aiohttp.ClientTimeout(total=self.valves.ENRICH_TIMEOUT),
+                ) as resp:
+                    if resp.status != 200:
+                        return ""
+                    data = await resp.json()
+                    return self._format_session_bootstrap(data)
+        except Exception as exc:
+            print(f"[cortex_pipe] session bootstrap fetch failed: {exc}")
+            return ""
+
+    @staticmethod
+    def _format_session_bootstrap(data: dict) -> str:
+        """v6.5. Render the /v1/session/bootstrap payload into a short
+        system-prompt block. Defensive against any field being missing or
+        empty - a partial briefing is still better than none, matching
+        stage 2's fail-soft discipline everywhere else. Deliberately does
+        NOT surface data["constitution"] here - that belongs to stage 5
+        (gate), per CANON Phase 3 step 11, not stage 2's context-injection
+        job; duplicating it here would be scope creep on this step."""
+        lines: list[str] = ["[Session briefing:]"]
+
+        briefing = data.get("briefing") or {}
+        observations = briefing.get("observations") or []
+        if observations:
+            lines.append("Recent activity:")
+            for obs in observations[:5]:
+                content = (obs.get("content") or "").strip()[:200]
+                if content:
+                    lines.append(f"  * {content}")
+
+        portfolio = data.get("portfolio") or {}
+        projects = portfolio.get("projects") or []
+        if projects:
+            names = ", ".join(p.get("name", "") for p in projects[:12] if p.get("name"))
+            if names:
+                lines.append(f"Active portfolio: {names}")
+
+        agenda = data.get("proactive_agenda") or {}
+        seeds = agenda.get("seeds") or []
+        if seeds:
+            lines.append("Ready to raise, if it fits naturally:")
+            for s in seeds[:3]:
+                content = (s.get("content") or "").strip()[:150]
+                if content:
+                    lines.append(f"  * {content}")
+        gaps = agenda.get("gaps") or []
+        if gaps:
+            lines.append("Open curiosity:")
+            for g in gaps[:3]:
+                obs = (g.get("observation") or "").strip()[:150]
+                if obs:
+                    lines.append(f"  * {obs}")
+
+        return chr(10).join(lines) if len(lines) > 1 else ""
+
     async def _enrich(self, intake: Intake) -> Enriched:
         """Stage 2. Fire every context adapter in parallel. Zero LLM tokens."""
         self_model = self._load_self_model()
         tasks = {
             "action_classes": asyncio.create_task(self._fetch_action_classes()),
-            "memory": asyncio.create_task(self._cortex_recall(intake.user_message)),
+            "memory": asyncio.create_task(self._cortex_recall(intake.user_message, entities=intake.entities)),
             "beliefs": asyncio.create_task(self._cortex_beliefs(intake.user_message)),
             "gaps": asyncio.create_task(self._cortex_gaps()),
         }
+        # v6.7 (CANON Sec7.0 step 11): constitutional rules (cached after first fetch)
+        tasks["constitutional_rules"] = asyncio.create_task(self._fetch_constitutional_rules())
+        # v6.5 (CANON Sec7.0 Phase 2 step 8): only fetched on session start -
+        # first message of a conversation. Not fired every turn; a full
+        # briefing on every message would be wasteful, and stage 2 already
+        # gives per-message context via memory/beliefs/gaps above.
+        if self.valves.ENABLE_SESSION_BOOTSTRAP and intake.is_session_start:
+            tasks["session_bootstrap"] = asyncio.create_task(self._cortex_session_bootstrap())
         results = await asyncio.gather(*tasks.values(), return_exceptions=True)
         out = {}
         for key, res in zip(tasks.keys(), results):
             out[key] = res if isinstance(res, str) else ""
+
+        # v6.7: constitutional rules come back as a list, not a string
+        const_rules = out.get("constitutional_rules", [])
+        if not isinstance(const_rules, list):
+            const_rules = []
 
         return Enriched(
             intake=intake,
@@ -598,6 +829,8 @@ class Pipe:
             action_classes=out["action_classes"],
             whetstone_frame=_WHETSTONE if self.valves.ENABLE_WHETSTONE else "",
             self_model=self_model,
+            session_bootstrap=out.get("session_bootstrap", ""),
+            constitutional_rules=const_rules,
         )
 
     # ── STAGE 3: classify (deterministic routing) ───────────────────────────
@@ -633,6 +866,11 @@ class Pipe:
 
     def _build_system(self, intake: Intake, enriched: Enriched) -> str:
         parts: list[str] = []
+        # v6.5 (CANON Sec7.0 Phase 2 step 8, "Waking Mind" Layer 1): the
+        # session-opening briefing, when fetched (see _enrich), goes first -
+        # broad orientation before self-model/topic-specific context.
+        if enriched.session_bootstrap:
+            parts.append(enriched.session_bootstrap)
         if enriched.self_model:
             parts.append(f"<greg_self_model>\n{enriched.self_model}\n</greg_self_model>")
         if enriched.action_classes:
@@ -658,6 +896,21 @@ class Pipe:
             parts.append(intake.base_system)
         if enriched.whetstone_frame:
             parts.append(enriched.whetstone_frame)
+        # v6.7 (CANON Sec7.0 step 11): constitutional principles - belt-and-
+        # suspenders with decide.ts stage 8 server-side check. The LLM sees
+        # these while generating; the server catches anything that slips through.
+        if enriched.constitutional_rules:
+            rules_text = "\n".join(
+                f"- **{r.get('name', '?')}**: {r.get('principle', '')} "
+                f"(enforcement: {r.get('enforcement', 'flag')})"
+                for r in enriched.constitutional_rules
+            )
+            parts.append(
+                "## Constitutional Principles\n"
+                "The following governance principles are immutable. Any response "
+                "that violates them must be flagged or blocked:\n\n"
+                + rules_text
+            )
         return "\n\n".join(parts)
 
     def _build_prompt(self, intake: Intake, enriched: Enriched) -> str:
@@ -689,6 +942,10 @@ class Pipe:
                         "ring": 0,
                         "max_tokens": max_tokens,
                         "surface": "greg-ui",
+                        # v6.6 (CANON Sec7.0 step 3): opt-in, additive on the
+                        # CORTEX side (ai-complete.ts) - absent/False changes
+                        # nothing about this call.
+                        "enable_effector_tools": self.valves.ENABLE_EFFECTOR_TOOLS,
                     },
                     headers=cortex_headers,
                     timeout=aiohttp.ClientTimeout(total=self.valves.CASCADE_TIMEOUT),
@@ -1007,15 +1264,23 @@ class Pipe:
         except Exception as exc:
             print(f"[cortex_pipe] brain_remember failed: {exc}")
 
-    async def _beliefs_absorb(self, user_message: str, response: str) -> None:
-        """Best-effort: feed the exchange into belief formation. VERIFIED 2026-09-23."""
+    async def _beliefs_absorb(self, intake: Intake, response: str) -> None:
+        """Best-effort: feed the exchange into belief formation.
+
+        v6.4 FIX (2026-09-25, CANON Sec7.0 Phase 0 step 1): subject is now
+        dynamic (_derive_belief_subject) instead of the static
+        "greg-ui-exchange" every belief used to pile up under, and noise
+        is filtered before the network call (_is_noise_exchange)."""
+        if _is_noise_exchange(intake.user_message, response):
+            return
+        subject = _derive_belief_subject(intake)
         try:
             async with aiohttp.ClientSession() as sess:
                 await sess.post(
                     f"{self.valves.CORTEX_URL}/v1/beliefs",
                     json={
-                        "subject": "greg-ui-exchange",
-                        "claim": f"User: {user_message[:300]} | Greg: {response[:300]}",
+                        "subject": subject,
+                        "claim": f"User: {intake.user_message[:300]} | Greg: {response[:300]}",
                         "provenance": "observed",
                         "confidence": 0.5,
                         "ring": 0,
@@ -1053,7 +1318,7 @@ class Pipe:
         if self.valves.ENABLE_ROSETTA:
             asyncio.create_task(self._rosetta_ingest(intake.user_message))
         asyncio.create_task(self._brain_remember(intake.user_message, response))
-        asyncio.create_task(self._beliefs_absorb(intake.user_message, response))
+        asyncio.create_task(self._beliefs_absorb(intake, response))
         asyncio.create_task(self._gap_form(intake, enriched))
 
     # ── STAGE 7: emit (deterministic) ────────────────────────────────────────
@@ -1129,6 +1394,48 @@ class Pipe:
         except Exception as exc:
             print(f"[cortex_pipe] dispatch INSERT error: {exc}")
 
+    async def _maybe_append_seed(self, response: str) -> str:
+        """v6.7 (CANON Sec7.0 step 10): Append a conversation seed to
+        Greg's response when appropriate. Seeds are Greg's own curiosities
+        and agenda items - things he wants to bring up but hasn't had a
+        natural opening for. Gated on frequency (~every 5 turns) and
+        response shape (not when already asking a question or very long)."""
+        self._turn_count += 1
+        if self._turn_count % 5 != 3:  # attempt on turns 3, 8, 13, ...
+            return response
+        # Don't seed if the response already asks a question or is very long
+        if '?' in response[-200:] or len(response) > 1500:
+            return response
+        try:
+            url = f"{self.valves.CORTEX_URL}/v1/seeds/top"
+            async with aiohttp.ClientSession() as sess:
+                async with sess.get(
+                    url,
+                    headers=self._cortex_auth_headers(),
+                    timeout=aiohttp.ClientTimeout(total=5),
+                ) as resp:
+                    if resp.status != 200:
+                        return response
+                    data = await resp.json()
+                    seed = data.get("seed")
+                    if not seed or not seed.get("text"):
+                        return response
+                    seed_text = seed["text"]
+                    seed_id = seed["id"]
+                # Append as a natural conversational bridge
+                response_with_seed = response.rstrip() + f"\n\nBy the way \u2014 {seed_text}"
+                # Mark the seed as surfaced so it's not repeated
+                async with sess.patch(
+                    f"{self.valves.CORTEX_URL}/v1/seeds/{seed_id}/surface",
+                    headers=self._cortex_auth_headers(),
+                    timeout=aiohttp.ClientTimeout(total=5),
+                ) as _:
+                    pass
+                return response_with_seed
+        except Exception:
+            # Seeds are best-effort - never block the response
+            return response
+
     async def _emit(self, response: str) -> str:
         """Stage 7. Ring/audience filtering (pass-through, single-user
         surface today) + dispatch-block extraction + proactive suffix."""
@@ -1139,6 +1446,7 @@ class Pipe:
 
         if self.valves.ENABLE_PROACTIVE_SEEDS:
             response += self._proactive_suffix(response)
+            response = await self._maybe_append_seed(response)
 
         return response
 

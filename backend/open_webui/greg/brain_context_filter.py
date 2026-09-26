@@ -5,7 +5,7 @@ Filter ID: brain_context_filter
 Inlet:  Skips brain.db recall for pipe models (CORTEX pipe handles its own recall)
 Outlet: Captures David's messages to ROSETTA for voice corpus + brain.db ingestion
 
-Updated 2026-08-20
+Updated 2026-09-26
 
 Valve defaults read from CORTEX_URL / CORTEX_KEY environment variables —
 never hardcoded here, since this repo is public.
@@ -18,7 +18,7 @@ from typing import Optional, Callable, Awaitable
 from pydantic import BaseModel, Field
 
 
-PIPE_MODEL_PREFIXES = ["cortex_pipe.", "greg-"]
+PIPE_MODEL_PREFIXES = ["cortex_pipe."]
 
 
 class Filter:
@@ -78,7 +78,7 @@ class Filter:
     ) -> dict:
         """Capture David's messages to ROSETTA on every response.
 
-        Skipped for pipe models (cortex_pipe.*, greg-*): cortex_pipe.py
+        Skipped for pipe models (cortex_pipe.*): cortex_pipe.py
         captures David's message itself at the start of its own pipe(),
         because Open WebUI does not reliably call outlet() for pipe-model
         responses. Capturing here too would double-ingest into ROSETTA for

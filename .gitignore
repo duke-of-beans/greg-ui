@@ -311,3 +311,12 @@ cypress/videos
 cypress/screenshots
 .vscode/settings.json
 .cptr
+
+# Ad-hoc backup snapshots (cortex_pipe patch history, etc.) — never commit these,
+# they're local safety copies only. Added 2026-09-26 during no-tech-debt pass.
+*.bak
+*.bak-*
+*.bak.*
+*.bak_*
+*_backup_*
+*.backup_*
