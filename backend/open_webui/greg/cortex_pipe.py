@@ -26,6 +26,28 @@ v5.0's provider chain (_try_cascade / _try_furnace / _try_effector) is
 UNCHANGED and lives entirely inside stage 4 - this is additive structure
 around it, not a rewrite of the parts that already work.
 
+v6.11 FIX (2026-09-26, third field test, live end-to-end retest
+after v6.9+v6.10 shipped): with the network layer finally correct
+(G7's Ollama was bound to 127.0.0.1 only until this pass - fixed
+separately, outside this file, via OLLAMA_HOST), the actual retest
+still came back "all offline". Root cause: _try_private_node()'s
+own health-check timeout was 3s - too tight for a Tailscale path
+that had just come up (G7 timed out on the very first live call
+after its restart, then answered a plain curl fine seconds later
+from inside the same container). Raised to 8s. Also closed a real
+asymmetry while in here: Furnace effectively got two tries (initial
++ post-wake retry) but G7, which has no wake path, got exactly one -
+so a single slow health check took the whole lane down with zero
+recourse. _try_private_node() now returns a (text, reason) tuple
+instead of just text, so _handle_private() can retry only on
+"unreachable" (the transient case) and skip retrying on
+"no_model"/"bad_response" (static facts that a retry can't change -
+this also fixes a pre-existing, previously-flagged-but-deferred bug
+where a Furnace wake fired even when Furnace was reachable and
+simply lacked hermes3/dolphin3, confirmed wasteful in this same
+session's logs). Every node now gets a real second attempt before
+being declared offline.
+
 v6.10 FIX (2026-09-26, same day, second field test): the wake
 mechanism itself was confirmed genuinely working - a direct test
 with the real auth header (v6.9's connectivity fix was correct)
@@ -255,7 +277,7 @@ from typing import Optional
 import aiohttp
 from pydantic import BaseModel
 
-VERSION = "6.10"
+VERSION = "6.11"
 _SM_PATH = "/home/david/greg-ui/ops-context/GREG_SELF_MODEL.md"
 
 OFFLINE_MSG = (
@@ -1272,23 +1294,35 @@ class Pipe:
 
     async def _try_private_node(
         self, node_name: str, base_url: str, ollama_messages: list[dict]
-    ):
-        """v6.10: one attempt against one private-lane Ollama node.
-        Returns the reply text on success, None on any failure (health
-        check failed, model not present, non-200 chat response,
-        non-prose output, timeout, or connection error). Factored out of
-        _handle_private so the same attempt can be retried once, against
-        Furnace specifically, right after a successful wake - instead of
-        making David send a second message to get the actual answer."""
+    ) -> tuple[str | None, str]:
+        """v6.11: one attempt against one private-lane Ollama node.
+        Returns (reply_text, reason). reply_text is non-None only on
+        success. reason is "ok" on success, else "unreachable" (health
+        check timed out, refused the connection, or returned non-200 -
+        the only reason worth retrying, since it is the transient one),
+        "no_model" (node answered fine but has neither hermes3 nor
+        dolphin3 loaded - a static fact for this request; retrying
+        changes nothing), or "bad_response" (chat call itself failed or
+        returned non-prose output - also static for this request).
+        v6.11 also raised the health-check timeout 3s -> 8s: a single 3s
+        window was too tight for a Tailscale path that had just come up
+        (G7 timed out here in the field on 2026-09-26 immediately after
+        Ollama was restarted with the correct OLLAMA_HOST binding, then
+        answered a plain curl fine seconds later from inside the same
+        container - the 3s budget, not a real reachability problem, was
+        the failure). Factored out of _handle_private so the same
+        attempt can be retried once - after a successful Furnace wake,
+        or immediately for G7 - instead of making David send a second
+        message to get the actual answer."""
         try:
             async with aiohttp.ClientSession() as sess:
                 async with sess.get(
                     f"{base_url}/api/tags",
-                    timeout=aiohttp.ClientTimeout(total=3),
+                    timeout=aiohttp.ClientTimeout(total=8),
                 ) as health:
                     if health.status != 200:
                         print(f"[cortex_pipe] private: {node_name} health HTTP {health.status}")
-                        return None
+                        return None, "unreachable"
                     available = [
                         m.get("name", "")
                         for m in (await health.json()).get("models", [])
@@ -1300,7 +1334,7 @@ class Pipe:
                 )
                 if not active_model:
                     print(f"[cortex_pipe] private: no hermes3/dolphin3 on {node_name}")
-                    return None
+                    return None, "no_model"
 
                 async with sess.post(
                     f"{base_url}/api/chat",
@@ -1313,23 +1347,23 @@ class Pipe:
                 ) as resp:
                     if resp.status != 200:
                         print(f"[cortex_pipe] private HTTP {resp.status} on {node_name}")
-                        return None
+                        return None, "bad_response"
                     data = await resp.json()
                     text = self._clean(data.get("message", {}).get("content", ""))
                     if self._is_prose(text):
                         print(f"[cortex_pipe] private: served by {node_name}/{active_model}")
-                        return text
+                        return text, "ok"
                     print(f"[cortex_pipe] private non-prose on {node_name}: {text[:100]!r}")
-                    return None
+                    return None, "bad_response"
         except asyncio.TimeoutError:
             print(f"[cortex_pipe] private: {node_name} timeout")
-            return None
+            return None, "unreachable"
         except aiohttp.ClientConnectorError:
             print(f"[cortex_pipe] private: {node_name} unreachable")
-            return None
+            return None, "unreachable"
         except Exception as exc:
             print(f"[cortex_pipe] private error on {node_name}: {exc}")
-            return None
+            return None, "unreachable"
 
     async def _handle_private(
         self, user_message: str, messages: list[dict]
@@ -1342,20 +1376,31 @@ class Pipe:
         ollama_messages.append({"role": "user", "content": user_message})
 
         for node_name, base_url in self._PRIVATE_ENDPOINTS:
-            text = await self._try_private_node(node_name, base_url, ollama_messages)
+            text, reason = await self._try_private_node(node_name, base_url, ollama_messages)
             if text is not None:
                 return text
-            # v6.10: only Furnace has a wake path - G7 is a laptop, not
-            # something this system wakes remotely. Retry once, in the
-            # same turn, right after a successful wake - the whole point
-            # of waking it is to actually answer, not to make David send
-            # a second message.
+            # v6.11: retry only on "unreachable" - a transient condition
+            # worth a second try. "no_model"/"bad_response" are static
+            # facts about this request; retrying wastes a call (this is
+            # exactly what v6.10 did wrong: it woke Furnace and retried
+            # it even when the real answer was "Furnace has no
+            # hermes3/dolphin3" - confirmed wasteful via live logs,
+            # 2026-09-26, harmless but pointless). Furnace gets a wake
+            # before its retry since it is the one node this system can
+            # actually wake; G7 is a laptop, not something woken
+            # remotely, so it just gets an immediate second attempt -
+            # closing the gap that let one slow health-check window take
+            # down the whole lane with zero recourse (the actual field
+            # failure behind this fix, 2026-09-26).
+            if reason != "unreachable":
+                continue
             if node_name == "furnace":
                 woke = await self._wake_furnace_local()
-                if woke:
-                    text = await self._try_private_node(node_name, base_url, ollama_messages)
-                    if text is not None:
-                        return text
+                if not woke:
+                    continue
+            text, _ = await self._try_private_node(node_name, base_url, ollama_messages)
+            if text is not None:
+                return text
 
         return (
             "[Greg /Private] All local inference nodes are offline - "
