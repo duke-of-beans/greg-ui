@@ -16,6 +16,10 @@ services:
     volumes:
       - open-webui:/app/backend/data
       - ./backend/open_webui/greg/cortex_pipe.py:/app/backend/open_webui/greg/cortex_pipe.py:ro
+      # cortex_pipe reads GREG_SELF_MODEL.md from this absolute host path (_SM_PATH). Without the mount
+      # every turn logged "self-model load failed" and Greg ran without his self-model. A directory mount,
+      # so a git pull that replaces the file is picked up.
+      - ./ops-context:/home/david/greg-ui/ops-context:ro
     environment:
       - WEBUI_SECRET_KEY=${WEBUI_SECRET_KEY:-}
       - ENABLE_PLUGINS=true
