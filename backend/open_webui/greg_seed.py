@@ -6,6 +6,11 @@ but BEFORE uvicorn starts. Idempotent — skips functions that already exist.
 
 This is the canonical way Greg's cognitive pipeline ships with the image.
 No admin panel pasting. No manual configuration. The fork IS the product.
+
+The pipe (cortex_pipe) is CREATE-ONLY. Once its row exists, ops/open-webui/install_pipe.py
+(Gregore-private) is its only writer. The copy baked into the image is just a first-install
+bootstrap and goes stale, so overwriting the row from it on every start silently reverted
+the live pipe (2026-10-02: v6.44 -> v6.11 on a container recreate).
 """
 
 import asyncio
@@ -22,6 +27,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 GREG_FUNCTIONS_DIR = Path(__file__).parent / "greg"
 
 # Function definitions: id → metadata
+# create_only: never touch the row once it exists (something else owns its content).
 GREG_FUNCTIONS = [
     {
         "id": "cortex_pipe",
@@ -31,6 +37,7 @@ GREG_FUNCTIONS = [
         "description": "Greg's cognitive pipeline — brain recall, AI Gateway draft, Greg review",
         "is_active": True,
         "is_global": False,
+        "create_only": True,
     },
     {
         "id": "brain_context_filter",
@@ -89,6 +96,9 @@ async def seed_functions():
             existing = result.scalar_one_or_none()
 
             if existing:
+                if func_def.get("create_only"):
+                    # Owned by install_pipe.py; never overwrite from the image copy.
+                    continue
                 # Update content if changed
                 if existing.content != content:
                     existing.content = content
