@@ -14,6 +14,7 @@ Admin only: the panel shows David's portfolio work.
 from __future__ import annotations
 
 import logging
+import re
 from typing import AsyncIterator, Optional
 
 import aiohttp
@@ -26,6 +27,10 @@ from open_webui.utils.auth import get_admin_user
 log = logging.getLogger(__name__)
 
 router = APIRouter()
+
+# CORTEX_URL is set to the MCP endpoint on Sentinel (docker-compose.greg.yaml default: .../mcp). The work routes live at the
+# service root, so use the root whether or not the configured URL ends in /mcp.
+CORTEX_BASE = re.sub(r'/mcp/?$', '', CORTEX_URL.rstrip('/'))
 
 MAX_CHAT_ID = 200
 
@@ -49,7 +54,7 @@ async def get_chat_work(id: str, user=Depends(get_admin_user)):
     chat = _chat_id(id)
     try:
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as session:
-            async with session.get(f'{CORTEX_URL}/v1/work/chat', params={'id': chat}, headers=_headers()) as resp:
+            async with session.get(f'{CORTEX_BASE}/v1/work/chat', params={'id': chat}, headers=_headers()) as resp:
                 body = await resp.json(content_type=None)
                 if resp.status != 200:
                     detail = (body or {}).get('error') if isinstance(body, dict) else None
@@ -78,7 +83,7 @@ async def stream_chat_work(request: Request, chat: str, since: Optional[int] = N
     # Open upstream before answering, so a refused or unreachable CORTEX is an error status, not an empty stream.
     session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None, sock_connect=10, sock_read=60))
     try:
-        resp = await session.get(f'{CORTEX_URL}/v1/work/orders/events', params=params, headers=headers)
+        resp = await session.get(f'{CORTEX_BASE}/v1/work/orders/events', params=params, headers=headers)
     except Exception as e:
         await session.close()
         log.warning('work panel: CORTEX order stream failed to open: %s', e)
