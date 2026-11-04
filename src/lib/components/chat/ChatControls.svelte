@@ -1,5 +1,5 @@
 <script context="module" lang="ts">
-	let savedTab: 'controls' | 'files' | 'overview' = 'controls';
+	let savedTab: 'controls' | 'files' | 'overview' | 'work' = 'controls';
 </script>
 
 <script lang="ts">
@@ -34,6 +34,8 @@
 	import FileNav from './FileNav.svelte';
 	import PyodideFileNav from './PyodideFileNav.svelte';
 	import Overview from './Overview.svelte';
+	import WorkPanel from './GregWork/WorkPanel.svelte';
+	import { getChatWork } from '$lib/apis/greg/work';
 
 	const i18n = getContext('i18n');
 
@@ -80,8 +82,37 @@
 		(codeInterpreterEnabled && $config?.code?.interpreter_engine !== 'jupyter');
 	$: showOverviewTab = hasMessages;
 
+	// Greg's work panel (Gregore-private docs/GREGORE_WORK_PANEL_SPEC.md): the orders this chat started. Admin only.
+	$: showWorkTab = !!chatId && $user?.role === 'admin';
+	let workLive = 0;
+	let workCheckedFor: string | null = null;
+	const onWorkCounts = (c: { pressing: number; live: number; total: number }) => {
+		workLive = c.live;
+	};
+	// It opens itself only when the context calls for it: something needs David or is in flight in this chat.
+	const checkWork = async (id: string) => {
+		workCheckedFor = id;
+		workLive = 0;
+		try {
+			const r = await getChatWork(localStorage.token, id);
+			if (id !== chatId) return;
+			const pressing = r.cards.filter((c) => c.pressing).length;
+			workLive = r.cards.filter((c) => c.status !== 'done').length;
+			if ((pressing || workLive) && largeScreen) {
+				activeTab = 'work';
+				showControls.set(true);
+				await tick();
+				if (pane && !pane.isExpanded()) openPane();
+			}
+		} catch {
+			// The panel itself shows the error when opened; a failed check never opens it.
+		}
+	};
+	$: if (showWorkTab && chatId && chatId !== workCheckedFor) checkWork(chatId);
+
 	// Tab fallback: if active tab becomes hidden, switch to next available
 	$: if (!showOverviewTab && activeTab === 'overview') activeTab = 'controls';
+	$: if (!showWorkTab && activeTab === 'work') activeTab = 'controls';
 	$: if (!showFilesTab && activeTab === 'files') activeTab = 'controls';
 	$: if (!showControlsTab && activeTab === 'controls') {
 		if (showFilesTab) activeTab = 'files';
@@ -89,7 +120,7 @@
 	}
 
 	// Auto-close if there are no visible tabs
-	$: if (!showControlsTab && !showFilesTab && !showOverviewTab) {
+	$: if (!showControlsTab && !showFilesTab && !showOverviewTab && !showWorkTab) {
 		showControls.set(false);
 	}
 
@@ -307,6 +338,17 @@
 						<!-- Tab bar -->
 						<div class="flex items-center justify-between px-2 pt-2 pb-2 shrink-0">
 							<div class="flex gap-1 min-w-0 overflow-x-auto scrollbar-hidden">
+								{#if showWorkTab}
+									<button
+										class="px-2.5 py-1 text-sm rounded-lg transition whitespace-nowrap {activeTab ===
+										'work'
+											? 'bg-gray-100/40 dark:bg-gray-800/25 font-normal text-gray-700 dark:text-gray-200'
+											: 'text-gray-500 dark:text-gray-400 hover:bg-gray-100/30 dark:hover:bg-gray-800/20 hover:text-gray-600 dark:hover:text-gray-300'}"
+										on:click={() => (activeTab = 'work')}
+									>
+										{$i18n.t('Work')}{workLive > 0 ? ` · ${workLive}` : ''}
+									</button>
+								{/if}
 								{#if showControlsTab}
 									<button
 										class="px-2.5 py-1 text-sm rounded-lg transition whitespace-nowrap {activeTab ===
@@ -360,13 +402,15 @@
 						</div>
 
 						<div
-							class="flex-1 min-h-0 {activeTab === 'overview'
+							class="flex-1 min-h-0 {activeTab === 'overview' || activeTab === 'work'
 								? 'h-full'
 								: activeTab === 'controls'
 									? 'overflow-y-auto px-3 pt-1'
 									: ''}"
 						>
-							{#if activeTab === 'overview'}
+							{#if activeTab === 'work'}
+								<WorkPanel {chatId} onCounts={onWorkCounts} />
+							{:else if activeTab === 'overview'}
 								<Overview
 									{history}
 									onNodeClick={(e) => {
@@ -451,6 +495,17 @@
 							<!-- Tab bar -->
 							<div class="flex items-center justify-between px-2 pt-2 pb-2 shrink-0">
 								<div class="flex gap-1 min-w-0 overflow-x-auto scrollbar-hidden">
+									{#if showWorkTab}
+										<button
+											class="px-2.5 py-1 text-sm rounded-lg transition whitespace-nowrap {activeTab ===
+											'work'
+												? 'bg-gray-100/40 dark:bg-gray-800/25 font-normal text-gray-700 dark:text-gray-200'
+												: 'text-gray-500 dark:text-gray-400 hover:bg-gray-100/30 dark:hover:bg-gray-800/20 hover:text-gray-600 dark:hover:text-gray-300'}"
+											on:click={() => (activeTab = 'work')}
+										>
+											{$i18n.t('Work')}{workLive > 0 ? ` · ${workLive}` : ''}
+										</button>
+									{/if}
 									{#if showControlsTab}
 										<button
 											class="px-2.5 py-1 text-sm rounded-lg transition whitespace-nowrap {activeTab ===
@@ -504,13 +559,15 @@
 							</div>
 
 							<div
-								class="flex-1 min-h-0 {activeTab === 'overview'
+								class="flex-1 min-h-0 {activeTab === 'overview' || activeTab === 'work'
 									? 'h-full'
 									: activeTab === 'controls'
 										? 'overflow-y-auto px-3 pt-1'
 										: ''}"
 							>
-								{#if activeTab === 'overview'}
+								{#if activeTab === 'work'}
+									<WorkPanel {chatId} onCounts={onWorkCounts} />
+								{:else if activeTab === 'overview'}
 									<Overview
 										{history}
 										onNodeClick={(e) => {
