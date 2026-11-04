@@ -150,6 +150,7 @@ from open_webui.routers import (
     folders,
     functions,
     greg_home,
+    greg_work,
     groups,
     images,
     knowledge,
@@ -818,6 +819,7 @@ app.include_router(groups.router, prefix='/api/v1/groups', tags=['groups'])
 app.include_router(files.router, prefix='/api/v1/files', tags=['files'])
 app.include_router(functions.router, prefix='/api/v1/functions', tags=['functions'])
 app.include_router(greg_home.router, prefix='/api/v1/greg', tags=['greg'])
+app.include_router(greg_work.router, prefix='/api/v1/greg', tags=['greg'])
 app.include_router(evaluations.router, prefix='/api/v1/evaluations', tags=['evaluations'])
 if ENABLE_ADMIN_ANALYTICS:
     app.include_router(analytics.router, prefix='/api/v1/analytics', tags=['analytics'])
