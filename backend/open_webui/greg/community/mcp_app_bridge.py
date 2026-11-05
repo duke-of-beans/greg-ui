@@ -23,16 +23,11 @@ from starlette.responses import HTMLResponse, JSONResponse
 from starlette.routing import Route
 
 from mcp import types
-from mcp.client.session import ClientSession
-try:  # newer mcp: the transport takes a pre-built HTTP client instead of headers
-    from mcp.client.streamable_http import streamable_http_client
-    from mcp.shared._httpx_utils import create_mcp_http_client
-
-    def streamablehttp_client(url, headers=None):
-        return streamable_http_client(url, http_client=create_mcp_http_client(headers=headers))
-except ImportError:  # older mcp
-    from mcp.client.streamable_http import streamablehttp_client
-from mcp.shared.exceptions import McpError
+from mcp import Client
+from mcp.client.extension import advertise
+from mcp.client.streamable_http import streamable_http_client
+from mcp.shared._httpx_utils import create_mcp_http_client
+from mcp.shared.exceptions import MCPError
 
 LIST_PAGE_SIZE = 25
 SEARCH_RESULT_LIMIT = 5
@@ -229,43 +224,29 @@ def _extract_ui_html(resource_result: types.ReadResourceResult) -> tuple[str, di
     return "", {}
 
 
-async def _list_all_tools(session: ClientSession) -> list:
+async def _list_all_tools(session: Client) -> list:
     """Every tool on the server, following nextCursor across pages."""
     tools, cursor = [], None
     while True:
-        result = await session.list_tools(
-            params=types.PaginatedRequestParams(cursor=cursor)
-        )
+        result = await session.list_tools(cursor=cursor)
         tools.extend(result.tools)
-        cursor = result.nextCursor
+        cursor = result.next_cursor
         if not cursor:
             return tools
 
 
-class _AppsClientSession(ClientSession):
-    """ClientSession that advertises MCP Apps support when it initializes."""
-
-    async def send_request(self, request, *args, **kwargs):
-        if isinstance(request.root, types.InitializeRequest):
-            request.root.params.capabilities.extensions = {
-                MCP_APPS_EXTENSION: {"mimeTypes": [MCP_APPS_MIME_TYPE]}
-            }
-        return await super().send_request(request, *args, **kwargs)
-
-
-async def _connect_mcp(url: str, headers: dict | None) -> tuple[AsyncExitStack, ClientSession]:
-    """Open a streamable-HTTP MCP connection. Caller owns the returned stack."""
+async def _connect_mcp(url: str, headers: dict | None) -> tuple[AsyncExitStack, Client]:
+    """Open a streamable-HTTP MCP connection that advertises MCP Apps support. Caller owns the returned stack."""
     stack = AsyncExitStack()
     try:
-        transport = await stack.enter_async_context(
-            streamablehttp_client(url, headers=headers)
+        http_client = await stack.enter_async_context(create_mcp_http_client(headers=headers))
+        client = await stack.enter_async_context(
+            Client(
+                streamable_http_client(url, http_client=http_client),
+                extensions=[advertise(MCP_APPS_EXTENSION, {"mimeTypes": [MCP_APPS_MIME_TYPE]})],
+            )
         )
-        read_stream, write_stream = transport[0], transport[1]
-        session = await stack.enter_async_context(
-            _AppsClientSession(read_stream, write_stream)
-        )
-        await session.initialize()
-        return stack, session
+        return stack, client
     except Exception:
         await stack.aclose()
         raise
@@ -897,9 +878,7 @@ class Tools:
             elif method == "resources/read":
                 result = await session.read_resource(params.get("uri"))
             elif method == "resources/list":
-                result = await session.list_resources(
-                    params=types.PaginatedRequestParams(cursor=params.get("cursor"))
-                )
+                result = await session.list_resources(cursor=params.get("cursor"))
             else:
                 return _rpc_error(-32601, "Method not found")
             payload = result.model_dump(mode="json", by_alias=True, exclude_none=True)
@@ -909,7 +888,7 @@ class Tools:
             return await self._run_with_session(operation, request, user, tool_id)
         except AuthorizationRequired:
             return _rpc_error(-32000, "Sign in to the MCP server to continue.")
-        except McpError as e:
+        except MCPError as e:
             return _rpc_error(e.error.code, e.error.message)
 
     async def list_mcp_tools(
@@ -994,7 +973,7 @@ class Tools:
                     "name": tool.name,
                     "description": tool.description or "",
                     "has_ui": _extract_ui_resource_uri(tool) is not None,
-                    "parameters": tool.inputSchema,
+                    "parameters": tool.input_schema,
                 }
                 for _, tool in scored[:SEARCH_RESULT_LIMIT]
             ]
