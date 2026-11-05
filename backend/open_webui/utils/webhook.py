@@ -1,5 +1,4 @@
 import asyncio
-import json
 import logging
 
 from open_webui.config import WEBUI_FAVICON_URL
@@ -8,7 +7,8 @@ from open_webui.env import (
     AIOHTTP_CLIENT_SESSION_SSL,
     VERSION,
 )
-from open_webui.retrieval.web.utils import get_ssrf_safe_session, validate_url
+from open_webui.retrieval.web.utils import get_ssrf_safe_session, is_identity_encoding, validate_url
+from open_webui.utils.json_codec import JSONCodec
 
 log = logging.getLogger(__name__)
 
@@ -29,7 +29,7 @@ def _event_text(message: str, description: str | None = None, event_data: dict |
 
 async def post_webhook(name: str, url: str, message: str, event_data: dict, description: str | None = None) -> bool:
     try:
-        log.debug(f'post_webhook: {url}, {message}, {event_data}')
+        log.debug('post_webhook: %s, %s, %s', url, message, event_data)
         # Block private-IP / loopback / cloud-metadata targets — the URL is
         # caller-controlled (user notification settings under
         # ENABLE_USER_WEBHOOKS, automation notification triggers).
@@ -54,7 +54,7 @@ async def post_webhook(name: str, url: str, message: str, event_data: dict, desc
             if isinstance(user_data, dict):
                 user_dict = user_data
             else:
-                user_dict = json.loads(user_data)
+                user_dict = JSONCodec.loads(user_data)
             facts = [{'name': key, 'value': value} for key, value in user_dict.items()]
             if event_data.get('event'):
                 facts.insert(0, {'name': 'event', 'value': event_data.get('event')})
@@ -69,6 +69,9 @@ async def post_webhook(name: str, url: str, message: str, event_data: dict, desc
                     {
                         'activityTitle': message,
                         'activitySubtitle': f'{name} ({VERSION}) - {action}',
+                        # LICENSE covers this Open WebUI webhook logo.
+                        # Do not alter, remove, obscure, or replace it except as LICENSE permits:
+                        # https://docs.openwebui.com/license.
                         'activityImage': WEBUI_FAVICON_URL,
                         'text': description,
                         'facts': facts,
@@ -80,17 +83,19 @@ async def post_webhook(name: str, url: str, message: str, event_data: dict, desc
         else:
             payload = event_data
 
-        log.debug(f'payload: {payload}')
+        log.debug('payload: %s', payload)
         async with get_ssrf_safe_session() as session:
             async with session.post(
                 url,
                 json=payload,
                 ssl=AIOHTTP_CLIENT_SESSION_SSL,
                 allow_redirects=AIOHTTP_CLIENT_ALLOW_REDIRECTS,
+                headers={'Accept-Encoding': 'identity'},
             ) as r:
-                r_text = await r.text()
+                # The reply is only logged, so a compressed one is left unread rather than failing the delivery.
+                r_text = await r.text() if is_identity_encoding(r.headers.getall('Content-Encoding', ())) else ''
                 r.raise_for_status()
-                log.debug(f'r.text: {r_text}')
+                log.debug('r.text: %s', r_text)
 
         return True
     except Exception as e:

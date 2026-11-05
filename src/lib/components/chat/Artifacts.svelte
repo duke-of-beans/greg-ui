@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { toast } from 'svelte-sonner';
 	import { onMount, getContext, createEventDispatcher } from 'svelte';
-	const i18n = getContext('i18n');
+	const i18n: any = getContext('i18n');
 	const dispatch = createEventDispatcher();
 
 	import {
@@ -92,13 +92,6 @@
 	};
 
 	onMount(() => {
-		const unsubscribeArtifactCode = artifactCode.subscribe((value) => {
-			if (contents) {
-				const codeIdx = contents.findIndex((content) => content.content.includes(value));
-				selectedContentIdx = codeIdx !== -1 ? codeIdx : 0;
-			}
-		});
-
 		const unsubscribeArtifactContents = artifactContents.subscribe((value) => {
 			const newContents = value ?? [];
 			console.log('Artifact contents updated:', newContents);
@@ -109,14 +102,24 @@
 				selectedContentIdx = 0;
 			} else if (newContents.length > contents.length) {
 				selectedContentIdx = newContents.length - 1;
+			} else if (selectedContentIdx > newContents.length - 1) {
+				selectedContentIdx = newContents.length - 1;
 			}
 
 			contents = newContents;
 		});
 
+		const unsubscribeArtifactCode = artifactCode.subscribe((value) => {
+			if (contents && value) {
+				const codeIdx = contents.findIndex((content) => content.content.includes(value));
+				selectedContentIdx = codeIdx !== -1 ? codeIdx : 0;
+			}
+		});
+
 		return () => {
 			unsubscribeArtifactCode();
 			unsubscribeArtifactContents();
+			artifactCode.set(null);
 		};
 	});
 </script>
@@ -188,7 +191,7 @@
 
 					<div class="flex items-center gap-1.5">
 						<button
-							class="copy-code-button bg-none border-none text-xs bg-gray-50 hover:bg-gray-100 dark:bg-gray-850 dark:hover:bg-gray-800 transition rounded-md px-1.5 py-0.5"
+							class="bg-none border-none text-xs bg-gray-50 hover:bg-gray-100 dark:bg-gray-850 dark:hover:bg-gray-800 transition rounded-md px-1.5 py-0.5"
 							on:click={() => {
 								copyToClipboard(contents[selectedContentIdx].content);
 								copied = true;
@@ -201,6 +204,7 @@
 
 						<Tooltip content={$i18n.t('Download')}>
 							<button
+								aria-label={$i18n.t('Download')}
 								class=" bg-none border-none text-xs bg-gray-50 hover:bg-gray-100 dark:bg-gray-850 dark:hover:bg-gray-800 transition rounded-md p-0.5"
 								on:click={downloadArtifact}
 							>
@@ -211,6 +215,7 @@
 						{#if contents[selectedContentIdx].type === 'iframe'}
 							<Tooltip content={$i18n.t('Open in full screen')}>
 								<button
+									aria-label={$i18n.t('Open in full screen')}
 									class=" bg-none border-none text-xs bg-gray-50 hover:bg-gray-100 dark:bg-gray-850 dark:hover:bg-gray-800 transition rounded-md p-0.5"
 									on:click={showFullScreen}
 								>
@@ -222,6 +227,7 @@
 				</div>
 
 				<button
+					aria-label={$i18n.t('Close')}
 					class="self-center pointer-events-auto p-1 rounded-full bg-white dark:bg-gray-850"
 					on:click={() => {
 						dispatch('close');
@@ -245,13 +251,17 @@
 						{#if contents[selectedContentIdx].type === 'iframe'}
 							<iframe
 								bind:this={iframeElement}
-								title="Content"
+								title={$i18n.t('Content')}
 								srcdoc={injectCsp(
 									contents[selectedContentIdx].content,
 									$config?.ui?.iframe_csp ?? ''
 								)}
 								class="w-full border-0 h-full rounded-none"
-								sandbox="allow-scripts allow-downloads{($settings?.iframeSandboxAllowForms ?? false)
+								sandbox="{($settings?.iframeSandboxAllowScripts ?? true)
+									? 'allow-scripts'
+									: ''}{($settings?.iframeSandboxAllowDownloads ?? true)
+									? ' allow-downloads'
+									: ''}{($settings?.iframeSandboxAllowForms ?? true)
 									? ' allow-forms'
 									: ''}{($settings?.iframeSandboxAllowSameOrigin ?? false)
 									? ' allow-same-origin'

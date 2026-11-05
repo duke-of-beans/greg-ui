@@ -11,7 +11,7 @@ set -euo pipefail
 # expansion. The two can't be combined inline (`${VAR:-default,,}` makes
 # the default literal `,,`), so we normalise once up front and the simple
 # `${VAR,,}` form stays safe under `set -u` everywhere else.
-: "${WEB_LOADER_ENGINE:=}" "${USE_OLLAMA_DOCKER:=}" "${USE_CUDA_DOCKER:=}"
+: "${USE_SLIM_DOCKER:=}" "${WEB_LOADER_ENGINE:=}" "${USE_OLLAMA_DOCKER:=}" "${USE_CUDA_DOCKER:=}"
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
 cd "$SCRIPT_DIR" || exit 1
@@ -20,13 +20,12 @@ PYTHON_CMD=$(command -v python3 || command -v python)
 
 # ── Playwright browser installation (if configured) ──────────────────────────
 
-if [[ "${WEB_LOADER_ENGINE,,}" == "playwright" ]]; then
+if [[ "${USE_SLIM_DOCKER,,}" != "true" && "${WEB_LOADER_ENGINE,,}" == "playwright" ]]; then
   if [[ -z "${PLAYWRIGHT_WS_URL:-}" ]]; then
     echo "Installing Playwright Chromium browser..."
     playwright install chromium
     playwright install-deps chromium
   fi
-  python -c "import nltk; nltk.download('punkt_tab')"
 fi
 
 # ── Secret key setup ─────────────────────────────────────────────────────────
@@ -63,7 +62,7 @@ fi
 
 if [[ "${USE_CUDA_DOCKER,,}" == "true" ]]; then
   echo "CUDA enabled — extending LD_LIBRARY_PATH for torch/cudnn libraries."
-  export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}:/usr/local/lib/python3.11/site-packages/torch/lib:/usr/local/lib/python3.11/site-packages/nvidia/cudnn/lib"
+  export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}:/usr/local/lib/python3.12/site-packages/torch/lib:/usr/local/lib/python3.12/site-packages/nvidia/cudnn/lib"
 fi
 
 # ── HuggingFace Space deployment ─────────────────────────────────────────────
@@ -74,7 +73,7 @@ if [[ -n "${SPACE_ID:-}" ]]; then
   if [[ -n "${ADMIN_USER_EMAIL:-}" && -n "${ADMIN_USER_PASSWORD:-}" ]]; then
     echo "Creating admin user for Space..."
     WEBUI_SECRET_KEY="${WEBUI_SECRET_KEY:-}" \
-      uvicorn open_webui.main:app --host "$HOST" --port "$PORT" --forwarded-allow-ips "${FORWARDED_ALLOW_IPS:-*}" &
+      uvicorn open_webui.main:app --host "$HOST" --port "$PORT" --forwarded-allow-ips "${FORWARDED_ALLOW_IPS:-*}" --ws-per-message-deflate "${UVICORN_WS_PER_MESSAGE_DEFLATE:-true}" &
     webui_pid=$!
 
     echo "Waiting for server to become healthy..."
@@ -110,7 +109,7 @@ UVICORN_WORKERS="${UVICORN_WORKERS:-1}"
 if [[ "$#" -gt 0 ]]; then
   ARGS=("$@")
 else
-  ARGS=(--workers "$UVICORN_WORKERS")
+  ARGS=(--workers "$UVICORN_WORKERS" --ws-per-message-deflate "${UVICORN_WS_PER_MESSAGE_DEFLATE:-true}")
 fi
 
 exec env WEBUI_SECRET_KEY="${WEBUI_SECRET_KEY:-}" \

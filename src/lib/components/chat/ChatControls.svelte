@@ -3,17 +3,14 @@
 </script>
 
 <script lang="ts">
-	import { SvelteFlowProvider } from '@xyflow/svelte';
-	import { slide } from 'svelte/transition';
-	import { Pane, PaneResizer } from 'paneforge';
-	import { v4 as uuidv4 } from 'uuid';
-
-	import { onDestroy, onMount, tick, getContext } from 'svelte';
+	import type { TerminalContext } from '$lib/types';
+	import { onMount, tick, getContext } from 'svelte';
 	import {
 		config,
 		terminalServers,
-		mobile,
 		showControls,
+		showSidebar,
+		mobile,
 		showCallOverlay,
 		showArtifacts,
 		showEmbeds,
@@ -23,17 +20,17 @@
 		user
 	} from '$lib/stores';
 
-	import { uploadFile } from '$lib/apis/files';
-	import { toast } from 'svelte-sonner';
-
 	import Controls from './Controls/Controls.svelte';
-	import CallOverlay from './MessageInput/CallOverlay.svelte';
+	import CallPanel from './MessageInput/CallPanel.svelte';
 	import Drawer from '../common/Drawer.svelte';
+	import MobileSwipePanel from '../common/MobileSwipePanel.svelte';
+	import ResizableSidePanel from '../common/ResizableSidePanel.svelte';
 	import Artifacts from './Artifacts.svelte';
 	import Embeds from './ChatControls/Embeds.svelte';
 	import FileNav from './FileNav.svelte';
 	import PyodideFileNav from './PyodideFileNav.svelte';
 	import Overview from './Overview.svelte';
+	import { isSavedChatId } from '$lib/utils/chatId';
 	import WorkPanel from './GregWork/WorkPanel.svelte';
 	import { getChatWork } from '$lib/apis/greg/work';
 
@@ -43,12 +40,20 @@
 	export let models = [];
 
 	export let chatId = null;
+	export let terminalContext: TerminalContext | null = null;
+	export let chatUser = null;
 
 	export let chatFiles = [];
 	export let params = {};
+	export let onParamChange: (key: string, value: unknown) => void = () => {};
 
+	export let bridge: import('$lib/utils/realtime').RealtimeCall;
+	export let callMode = 'current';
 	export let eventTarget: EventTarget;
 	export let submitPrompt: Function;
+	export let onAskFile:
+		| ((instruction: string, file: import('$lib/apis/terminal').FilesystemFile) => Promise<void>)
+		| null = null;
 	export let stopResponse: Function;
 	export let showMessage: Function;
 	export let files;
@@ -56,13 +61,11 @@
 
 	export let codeInterpreterEnabled = false;
 
-	export let pane: Pane | null = null;
-	export let containerId = 'chat-container';
-
 	let largeScreen = false;
 	let dragged = false;
-	let minSize = 0;
-	let paneReady = false;
+	let mounted = false;
+	let controlsWidth = 300;
+	let viewportWidth = 0;
 
 	// Tab state for Controls+Files panel
 	let activeTab = savedTab;
@@ -74,11 +77,27 @@
 	$: hasMessages = history?.messages && Object.keys(history.messages).length > 0;
 
 	$: showControlsTab = $user?.role === 'admin' || ($user?.permissions?.chat?.controls ?? true);
+	const chatContext = (terminal: any) => terminal?.contexts?.chat ?? {};
+	const chatContextAvailable = (terminal: any) => chatContext(terminal) !== false;
+	const chatContextNeedsSavedChat = (terminal: any) =>
+		chatContext(terminal)?.context_id === 'chat_id';
+	$: selectedSystemTerminal = ($terminalServers ?? []).find(
+		(t) => t.id && t.id === $selectedTerminalId
+	);
+	$: selectedSystemTerminalAvailable =
+		selectedSystemTerminal &&
+		chatContextAvailable(selectedSystemTerminal) &&
+		!(chatContextNeedsSavedChat(selectedSystemTerminal) && !isSavedChatId(chatId));
+	$: terminalFilesAvailable = !!(
+		$config?.features?.enable_tool_servers &&
+		$selectedTerminalId &&
+		(selectedSystemTerminalAvailable ||
+			(!selectedSystemTerminal &&
+				$config?.features?.enable_direct_integrations &&
+				($user?.role === 'admin' || ($user?.permissions?.features?.direct_tool_servers ?? true))))
+	);
 	$: showFilesTab =
-		($selectedTerminalId &&
-			(($terminalServers ?? []).some((t) => t.id && t.id === $selectedTerminalId) ||
-				$user?.role === 'admin' ||
-				($user?.permissions?.features?.direct_tool_servers ?? true))) ||
+		terminalFilesAvailable ||
 		(codeInterpreterEnabled && $config?.code?.interpreter_engine !== 'jupyter');
 	$: showOverviewTab = hasMessages;
 
@@ -101,8 +120,6 @@
 			if ((pressing || workLive) && largeScreen) {
 				activeTab = 'work';
 				showControls.set(true);
-				await tick();
-				if (pane && !pane.isExpanded()) openPane();
 			}
 		} catch {
 			// The panel itself shows the error when opened; a failed check never opens it.
@@ -111,8 +128,8 @@
 	$: if (showWorkTab && chatId && chatId !== workCheckedFor) checkWork(chatId);
 
 	// Tab fallback: if active tab becomes hidden, switch to next available
-	$: if (!showOverviewTab && activeTab === 'overview') activeTab = 'controls';
 	$: if (!showWorkTab && activeTab === 'work') activeTab = 'controls';
+	$: if (!showOverviewTab && activeTab === 'overview') activeTab = 'controls';
 	$: if (!showFilesTab && activeTab === 'files') activeTab = 'controls';
 	$: if (!showControlsTab && activeTab === 'controls') {
 		if (showFilesTab) activeTab = 'files';
@@ -125,17 +142,14 @@
 	}
 
 	// Auto-switch to Files tab when display_file is triggered
-	$: if ($showFileNavPath) {
+	$: if ($showFileNavPath && terminalFilesAvailable) {
 		activeTab = 'files';
 		showControls.set(true);
 	}
 
-	// Auto-open Files tab when a terminal is selected (suppress panel open when full-screen)
-	$: if ($selectedTerminalId && showFilesTab) {
+	// Keep Files selected when a terminal is active; opening the panel is handled by selection UI.
+	$: if ($selectedTerminalId && terminalFilesAvailable) {
 		activeTab = 'files';
-		if (largeScreen) {
-			showControls.set($settings?.showFilesOnTerminalSelect ?? true);
-		}
 	}
 
 	// Clear selected direct terminal if user lost permission
@@ -143,64 +157,13 @@
 		$selectedTerminalId &&
 		$terminalServers !== null &&
 		!($terminalServers ?? []).some((t) => t.id && t.id === $selectedTerminalId) &&
-		!($user?.role === 'admin' || ($user?.permissions?.features?.direct_tool_servers ?? true))
+		!(
+			$config?.features?.enable_direct_integrations &&
+			($user?.role === 'admin' || ($user?.permissions?.features?.direct_tool_servers ?? true))
+		)
 	) {
 		selectedTerminalId.set(null);
 	}
-
-	// Attach a terminal file to the chat input
-	const handleTerminalAttach = async (blob: Blob, name: string, contentType: string) => {
-		const tempItemId = uuidv4();
-		const fileItem = {
-			type: 'file',
-			file: '',
-			id: null,
-			url: '',
-			name,
-			collection_name: '',
-			status: 'uploading',
-			error: '',
-			itemId: tempItemId,
-			size: blob.size
-		};
-
-		files = [...files, fileItem];
-
-		try {
-			const file = new File([blob], name, { type: contentType || 'application/octet-stream' });
-			const uploaded = await uploadFile(localStorage.token, file);
-			if (!uploaded) throw new Error('Upload failed');
-
-			const idx = files.findIndex((f) => f.itemId === tempItemId);
-			if (idx !== -1) {
-				files[idx] = {
-					...fileItem,
-					status: 'uploaded',
-					file: uploaded,
-					id: uploaded.id,
-					url: `${uploaded.id}`,
-					collection_name: uploaded?.meta?.collection_name
-				};
-				files = files;
-			}
-			toast.success($i18n.t('File attached to chat'));
-		} catch (e) {
-			files = files.filter((f) => f.itemId !== tempItemId);
-			toast.error($i18n.t('Failed to attach file'));
-		}
-	};
-
-	export const openPane = () => {
-		if (parseInt(localStorage?.chatControlsSize)) {
-			const container = document.getElementById(containerId);
-			let size = Math.floor(
-				(parseInt(localStorage?.chatControlsSize) / container.clientWidth) * 100
-			);
-			pane.resize(size);
-		} else {
-			pane.resize(minSize);
-		}
-	};
 
 	const handleMediaQuery = async (e) => {
 		if (e.matches) {
@@ -217,7 +180,6 @@
 				await tick();
 				showCallOverlay.set(true);
 			}
-			pane = null;
 		}
 	};
 
@@ -229,49 +191,20 @@
 	};
 
 	onMount(() => {
-		const mediaQuery = window.matchMedia('(min-width: 1024px)');
+		const mediaQuery = window.matchMedia('(min-width: 768px)');
 		mediaQuery.addEventListener('change', handleMediaQuery);
 		handleMediaQuery(mediaQuery);
 
-		let resizeObserver: ResizeObserver | null = null;
 		let isDestroyed = false;
 
-		// Wait for Svelte to render the Pane after largeScreen changed
 		const init = async () => {
 			await tick();
 
 			if (isDestroyed) return;
 
-			// If controls were persisted as open, set the pane to the saved size
-			if ($showControls && pane) {
-				openPane();
-			}
-
 			setTimeout(() => {
-				paneReady = true;
+				mounted = true;
 			}, 0);
-
-			const container = document.getElementById(containerId) as HTMLElement;
-			if (!container) return;
-
-			minSize = Math.floor((350 / container.clientWidth) * 100);
-			resizeObserver = new ResizeObserver((entries) => {
-				for (let entry of entries) {
-					const width = entry.contentRect.width;
-					minSize = Math.floor((350 / width) * 100);
-					if ($showControls) {
-						if (pane && pane.isExpanded() && pane.getSize() < minSize) {
-							pane.resize(minSize);
-						} else {
-							let size = Math.floor(
-								(parseInt(localStorage?.chatControlsSize) / container.clientWidth) * 100
-							);
-							if (size < minSize && pane) pane.resize(minSize);
-						}
-					}
-				}
-			});
-			resizeObserver.observe(container);
 		};
 		init();
 
@@ -280,8 +213,7 @@
 
 		return () => {
 			isDestroyed = true;
-			paneReady = false;
-			resizeObserver?.disconnect();
+			mounted = false;
 			if (!largeScreen) {
 				showControls.set(false);
 			}
@@ -300,182 +232,45 @@
 		if ($showCallOverlay) showCallOverlay.set(false);
 	};
 
-	$: if (paneReady && !chatId) closeHandler();
+	$: if (mounted && !chatId) closeHandler();
 
 	// Helper: is a "special" full-screen panel active?
 	$: specialPanel = $showCallOverlay || $showArtifacts || $showEmbeds;
 </script>
 
+<svelte:window bind:innerWidth={viewportWidth} />
+
 {#if !largeScreen}
-	{#if $showControls}
-		<Drawer
-			show={$showControls}
-			onClose={() => showControls.set(false)}
-			className="min-h-[100dvh] !bg-white dark:!bg-gray-850"
-		>
-			<div class="h-[100dvh] flex flex-col">
-				{#if $showCallOverlay}
-					<div
-						class="h-full max-h-[100dvh] bg-white text-gray-700 dark:bg-black dark:text-gray-300 flex justify-center"
-					>
-						<CallOverlay
-							bind:files
-							{submitPrompt}
-							{stopResponse}
-							{modelId}
-							{chatId}
-							{eventTarget}
-							on:close={() => showControls.set(false)}
-						/>
-					</div>
-				{:else if $showEmbeds}
-					<Embeds />
-				{:else if $showArtifacts}
-					<Artifacts {history} />
-				{:else}
-					<!-- Controls + Files tabs -->
-					<div class="flex flex-col h-full min-h-0">
-						<!-- Tab bar -->
-						<div class="flex items-center justify-between px-2 pt-2 pb-2 shrink-0">
-							<div class="flex gap-1 min-w-0 overflow-x-auto scrollbar-hidden">
-								{#if showWorkTab}
-									<button
-										class="px-2.5 py-1 text-sm rounded-lg transition whitespace-nowrap {activeTab ===
-										'work'
-											? 'bg-gray-100/40 dark:bg-gray-800/25 font-normal text-gray-700 dark:text-gray-200'
-											: 'text-gray-500 dark:text-gray-400 hover:bg-gray-100/30 dark:hover:bg-gray-800/20 hover:text-gray-600 dark:hover:text-gray-300'}"
-										on:click={() => (activeTab = 'work')}
-									>
-										{$i18n.t('Work')}{workLive > 0 ? ` · ${workLive}` : ''}
-									</button>
-								{/if}
-								{#if showControlsTab}
-									<button
-										class="px-2.5 py-1 text-sm rounded-lg transition whitespace-nowrap {activeTab ===
-										'controls'
-											? 'bg-gray-100/40 dark:bg-gray-800/25 font-normal text-gray-700 dark:text-gray-200'
-											: 'text-gray-500 dark:text-gray-400 hover:bg-gray-100/30 dark:hover:bg-gray-800/20 hover:text-gray-600 dark:hover:text-gray-300'}"
-										on:click={() => (activeTab = 'controls')}
-									>
-										{$i18n.t('Controls')}
-									</button>
-								{/if}
-								{#if showFilesTab}
-									<button
-										class="px-2.5 py-1 text-sm rounded-lg transition whitespace-nowrap {activeTab ===
-										'files'
-											? 'bg-gray-100/40 dark:bg-gray-800/25 font-normal text-gray-700 dark:text-gray-200'
-											: 'text-gray-500 dark:text-gray-400 hover:bg-gray-100/30 dark:hover:bg-gray-800/20 hover:text-gray-600 dark:hover:text-gray-300'}"
-										on:click={() => (activeTab = 'files')}
-									>
-										{$i18n.t('Files')}
-									</button>
-								{/if}
-								{#if showOverviewTab}
-									<button
-										class="px-2.5 py-1 text-sm rounded-lg transition whitespace-nowrap {activeTab ===
-										'overview'
-											? 'bg-gray-100/40 dark:bg-gray-800/25 font-normal text-gray-700 dark:text-gray-200'
-											: 'text-gray-500 dark:text-gray-400 hover:bg-gray-100/30 dark:hover:bg-gray-800/20 hover:text-gray-600 dark:hover:text-gray-300'}"
-										on:click={() => (activeTab = 'overview')}
-									>
-										{$i18n.t('Overview')}
-									</button>
-								{/if}
-							</div>
-							<button
-								class="p-1 rounded-lg text-gray-500 dark:text-gray-400"
-								on:click={() => showControls.set(false)}
-								aria-label={$i18n.t('Close')}
-							>
-								<svg
-									xmlns="http://www.w3.org/2000/svg"
-									viewBox="0 0 24 24"
-									fill="none"
-									stroke="currentColor"
-									stroke-width="1.5"
-									class="size-4"
-								>
-									<path stroke-linecap="round" stroke-linejoin="round" d="M6 18 18 6M6 6l12 12" />
-								</svg>
-							</button>
-						</div>
-
-						<div
-							class="flex-1 min-h-0 {activeTab === 'overview' || activeTab === 'work'
-								? 'h-full'
-								: activeTab === 'controls'
-									? 'overflow-y-auto px-3 pt-1'
-									: ''}"
-						>
-							{#if activeTab === 'work'}
-								<WorkPanel {chatId} onCounts={onWorkCounts} />
-							{:else if activeTab === 'overview'}
-								<Overview
-									{history}
-									onNodeClick={(e) => {
-										const node = e.node;
-										showMessage(node.data.message, true);
-									}}
-								/>
-							{:else if activeTab === 'files' && $selectedTerminalId}
-								<FileNav onAttach={handleTerminalAttach} {chatId} />
-							{:else if activeTab === 'files' && codeInterpreterEnabled}
-								<PyodideFileNav />
-							{:else}
-								<Controls embed={true} {models} bind:chatFiles bind:params />
-							{/if}
-						</div>
-					</div>
-				{/if}
-			</div>
-		</Drawer>
-	{/if}
-{:else}
-	{#if $showControls}
-		<PaneResizer
-			class="relative flex items-center justify-center group border-l border-gray-50 dark:border-gray-850/30 hover:border-gray-200 dark:hover:border-gray-800 transition z-20"
-			id="controls-resizer"
-		>
-			<div
-				class="absolute -left-1.5 -right-1.5 -top-0 -bottom-0 z-20 cursor-col-resize bg-transparent"
-			/>
-		</PaneResizer>
-	{/if}
-
-	<Pane
-		bind:pane
-		defaultSize={0}
-		onResize={(size) => {
-			if ($showControls && pane.isExpanded()) {
-				if (size < minSize) pane.resize(minSize);
-				if (size < minSize) {
-					localStorage.chatControlsSize = 0;
-				} else {
-					const container = document.getElementById(containerId);
-					localStorage.chatControlsSize = Math.floor((size / 100) * container.clientWidth);
-				}
-			}
-		}}
-		onCollapse={() => {
-			if (paneReady) showControls.set(false);
-		}}
-		collapsible={true}
-		class="z-10 bg-white dark:bg-gray-900"
+	<MobileSwipePanel
+		open={$showControls}
+		enabled={$mobile}
+		side="right"
+		blocked={$showSidebar || (!showControlsTab && !showFilesTab && !showOverviewTab)}
+		startTarget="#chat-container"
+		width={viewportWidth}
+		onOpenChange={(open) => showControls.set(open)}
+		let:visible
+		let:panelStyle
+		let:backdropStyle
 	>
-		{#if $showControls}
-			<div class="flex max-h-full min-h-full">
-				<div
-					class="w-full {specialPanel && !$showCallOverlay
-						? ' '
-						: 'bg-white dark:bg-gray-900'} z-40 pointer-events-auto {activeTab === 'files'
-						? ''
-						: 'overflow-y-auto'} scrollbar-hidden"
-					id="controls-container"
-				>
+		{#if visible}
+			<Drawer
+				show={true}
+				onClose={() => showControls.set(false)}
+				onRequestClose={() => showControls.set(false)}
+				panelStyle={$mobile ? panelStyle : ''}
+				backdropStyle={$mobile ? backdropStyle : ''}
+				swipeSide={$mobile ? 'right' : undefined}
+				className="min-h-[100dvh] !bg-white dark:!bg-gray-850"
+			>
+				<div class="h-[100dvh] flex flex-col">
 					{#if $showCallOverlay}
-						<div class="w-full h-full flex justify-center">
-							<CallOverlay
+						<div
+							class="h-full max-h-[100dvh] bg-white text-gray-700 dark:bg-black dark:text-gray-300 flex justify-center"
+						>
+							<CallPanel
+								{bridge}
+								bind:callMode
 								bind:files
 								{submitPrompt}
 								{stopResponse}
@@ -486,9 +281,9 @@
 							/>
 						</div>
 					{:else if $showEmbeds}
-						<Embeds overlay={dragged} />
+						<Embeds />
 					{:else if $showArtifacts}
-						<Artifacts {history} overlay={dragged} />
+						<Artifacts {history} />
 					{:else}
 						<!-- Controls + Files tabs -->
 						<div class="flex flex-col h-full min-h-0">
@@ -497,7 +292,7 @@
 								<div class="flex gap-1 min-w-0 overflow-x-auto scrollbar-hidden">
 									{#if showWorkTab}
 										<button
-											class="px-2.5 py-1 text-sm rounded-lg transition whitespace-nowrap {activeTab ===
+											class="px-2.5 py-0.5 text-sm rounded-lg transition whitespace-nowrap {activeTab ===
 											'work'
 												? 'bg-gray-100/40 dark:bg-gray-800/25 font-normal text-gray-700 dark:text-gray-200'
 												: 'text-gray-500 dark:text-gray-400 hover:bg-gray-100/30 dark:hover:bg-gray-800/20 hover:text-gray-600 dark:hover:text-gray-300'}"
@@ -508,7 +303,7 @@
 									{/if}
 									{#if showControlsTab}
 										<button
-											class="px-2.5 py-1 text-sm rounded-lg transition whitespace-nowrap {activeTab ===
+											class="px-2.5 py-0.5 text-sm rounded-lg transition whitespace-nowrap {activeTab ===
 											'controls'
 												? 'bg-gray-100/40 dark:bg-gray-800/25 font-normal text-gray-700 dark:text-gray-200'
 												: 'text-gray-500 dark:text-gray-400 hover:bg-gray-100/30 dark:hover:bg-gray-800/20 hover:text-gray-600 dark:hover:text-gray-300'}"
@@ -519,7 +314,7 @@
 									{/if}
 									{#if showFilesTab}
 										<button
-											class="px-2.5 py-1 text-sm rounded-lg transition whitespace-nowrap {activeTab ===
+											class="px-2.5 py-0.5 text-sm rounded-lg transition whitespace-nowrap {activeTab ===
 											'files'
 												? 'bg-gray-100/40 dark:bg-gray-800/25 font-normal text-gray-700 dark:text-gray-200'
 												: 'text-gray-500 dark:text-gray-400 hover:bg-gray-100/30 dark:hover:bg-gray-800/20 hover:text-gray-600 dark:hover:text-gray-300'}"
@@ -530,7 +325,7 @@
 									{/if}
 									{#if showOverviewTab}
 										<button
-											class="px-2.5 py-1 text-sm rounded-lg transition whitespace-nowrap {activeTab ===
+											class="px-2.5 py-0.5 text-sm rounded-lg transition whitespace-nowrap {activeTab ===
 											'overview'
 												? 'bg-gray-100/40 dark:bg-gray-800/25 font-normal text-gray-700 dark:text-gray-200'
 												: 'text-gray-500 dark:text-gray-400 hover:bg-gray-100/30 dark:hover:bg-gray-800/20 hover:text-gray-600 dark:hover:text-gray-300'}"
@@ -570,28 +365,165 @@
 								{:else if activeTab === 'overview'}
 									<Overview
 										{history}
+										{chatUser}
 										onNodeClick={(e) => {
 											const node = e.node;
-											if (node?.data?.message?.favorite) {
-												history.messages[node.data.message.id].favorite = true;
-											} else {
-												history.messages[node.data.message.id].favorite = null;
-											}
 											showMessage(node.data.message, true);
 										}}
 									/>
-								{:else if activeTab === 'files' && $selectedTerminalId}
-									<FileNav onAttach={handleTerminalAttach} overlay={dragged} {chatId} />
+								{:else if activeTab === 'files' && terminalFilesAvailable && $selectedTerminalId}
+									<FileNav {onAskFile} {chatId} bind:terminalContext />
 								{:else if activeTab === 'files' && codeInterpreterEnabled}
-									<PyodideFileNav overlay={dragged} />
+									<PyodideFileNav />
 								{:else}
-									<Controls embed={true} {models} bind:chatFiles bind:params />
+									<Controls embed={true} {models} bind:chatFiles bind:params {onParamChange} />
 								{/if}
 							</div>
 						</div>
 					{/if}
 				</div>
-			</div>
+			</Drawer>
 		{/if}
-	</Pane>
+	</MobileSwipePanel>
+{:else}
+	<ResizableSidePanel
+		open={$showControls}
+		bind:width={controlsWidth}
+		minWidth={300}
+		minSiblingWidth={360}
+		storageKey="chatControlsSize"
+		className="h-full z-10 bg-white dark:bg-gray-900"
+	>
+		<div class="flex h-full max-h-full min-h-full">
+			<div
+				class="w-full {specialPanel && !$showCallOverlay
+					? ' '
+					: 'bg-white dark:bg-gray-900'} z-40 pointer-events-auto {activeTab === 'files'
+					? ''
+					: 'overflow-y-auto'} scrollbar-hidden"
+				id="controls-container"
+			>
+				{#if $showCallOverlay}
+					<div class="w-full h-full flex justify-center">
+						<CallPanel
+							{bridge}
+							bind:callMode
+							bind:files
+							{submitPrompt}
+							{stopResponse}
+							{modelId}
+							{chatId}
+							{eventTarget}
+							on:close={() => showControls.set(false)}
+						/>
+					</div>
+				{:else if $showEmbeds}
+					<Embeds overlay={dragged} />
+				{:else if $showArtifacts}
+					<Artifacts {history} overlay={dragged} />
+				{:else}
+					<!-- Controls + Files tabs -->
+					<div class="flex flex-col h-full min-h-0">
+						<!-- Tab bar -->
+						<div class="flex items-center justify-between px-2 pt-2 pb-2 shrink-0">
+							<div class="flex gap-1 min-w-0 overflow-x-auto scrollbar-hidden">
+								{#if showWorkTab}
+									<button
+										class="px-2.5 py-0.5 text-sm rounded-lg transition whitespace-nowrap {activeTab ===
+										'work'
+											? 'bg-gray-100/40 dark:bg-gray-800/25 font-normal text-gray-700 dark:text-gray-200'
+											: 'text-gray-500 dark:text-gray-400 hover:bg-gray-100/30 dark:hover:bg-gray-800/20 hover:text-gray-600 dark:hover:text-gray-300'}"
+										on:click={() => (activeTab = 'work')}
+									>
+										{$i18n.t('Work')}{workLive > 0 ? ` · ${workLive}` : ''}
+									</button>
+								{/if}
+								{#if showControlsTab}
+									<button
+										class="px-2.5 py-0.5 text-sm rounded-lg transition whitespace-nowrap {activeTab ===
+										'controls'
+											? 'bg-gray-100/40 dark:bg-gray-800/25 font-normal text-gray-700 dark:text-gray-200'
+											: 'text-gray-500 dark:text-gray-400 hover:bg-gray-100/30 dark:hover:bg-gray-800/20 hover:text-gray-600 dark:hover:text-gray-300'}"
+										on:click={() => (activeTab = 'controls')}
+									>
+										{$i18n.t('Controls')}
+									</button>
+								{/if}
+								{#if showFilesTab}
+									<button
+										class="px-2.5 py-0.5 text-sm rounded-lg transition whitespace-nowrap {activeTab ===
+										'files'
+											? 'bg-gray-100/40 dark:bg-gray-800/25 font-normal text-gray-700 dark:text-gray-200'
+											: 'text-gray-500 dark:text-gray-400 hover:bg-gray-100/30 dark:hover:bg-gray-800/20 hover:text-gray-600 dark:hover:text-gray-300'}"
+										on:click={() => (activeTab = 'files')}
+									>
+										{$i18n.t('Files')}
+									</button>
+								{/if}
+								{#if showOverviewTab}
+									<button
+										class="px-2.5 py-0.5 text-sm rounded-lg transition whitespace-nowrap {activeTab ===
+										'overview'
+											? 'bg-gray-100/40 dark:bg-gray-800/25 font-normal text-gray-700 dark:text-gray-200'
+											: 'text-gray-500 dark:text-gray-400 hover:bg-gray-100/30 dark:hover:bg-gray-800/20 hover:text-gray-600 dark:hover:text-gray-300'}"
+										on:click={() => (activeTab = 'overview')}
+									>
+										{$i18n.t('Overview')}
+									</button>
+								{/if}
+							</div>
+							<button
+								class="p-1 rounded-lg text-gray-500 dark:text-gray-400"
+								on:click={() => showControls.set(false)}
+								aria-label={$i18n.t('Close')}
+							>
+								<svg
+									xmlns="http://www.w3.org/2000/svg"
+									viewBox="0 0 24 24"
+									fill="none"
+									stroke="currentColor"
+									stroke-width="1.5"
+									class="size-4"
+								>
+									<path stroke-linecap="round" stroke-linejoin="round" d="M6 18 18 6M6 6l12 12" />
+								</svg>
+							</button>
+						</div>
+
+						<div
+							class="flex-1 min-h-0 {activeTab === 'overview' || activeTab === 'work'
+								? 'h-full'
+								: activeTab === 'controls'
+									? 'overflow-y-auto px-3 pt-1'
+									: ''}"
+						>
+							{#if activeTab === 'work'}
+								<WorkPanel {chatId} onCounts={onWorkCounts} />
+							{:else if activeTab === 'overview'}
+								<Overview
+									{history}
+									{chatUser}
+									onNodeClick={(e) => {
+										const node = e.node;
+										if (node?.data?.message?.favorite) {
+											history.messages[node.data.message.id].favorite = true;
+										} else {
+											history.messages[node.data.message.id].favorite = null;
+										}
+										showMessage(node.data.message, true);
+									}}
+								/>
+							{:else if activeTab === 'files' && terminalFilesAvailable && $selectedTerminalId}
+								<FileNav {onAskFile} overlay={dragged} {chatId} bind:terminalContext />
+							{:else if activeTab === 'files' && codeInterpreterEnabled}
+								<PyodideFileNav overlay={dragged} />
+							{:else}
+								<Controls embed={true} {models} bind:chatFiles bind:params {onParamChange} />
+							{/if}
+						</div>
+					</div>
+				{/if}
+			</div>
+		</div>
+	</ResizableSidePanel>
 {/if}
