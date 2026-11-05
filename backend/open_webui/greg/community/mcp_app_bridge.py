@@ -24,7 +24,14 @@ from starlette.routing import Route
 
 from mcp import types
 from mcp.client.session import ClientSession
-from mcp.client.streamable_http import streamablehttp_client
+try:  # newer mcp: the transport takes a pre-built HTTP client instead of headers
+    from mcp.client.streamable_http import streamable_http_client
+    from mcp.shared._httpx_utils import create_mcp_http_client
+
+    def streamablehttp_client(url, headers=None):
+        return streamable_http_client(url, http_client=create_mcp_http_client(headers=headers))
+except ImportError:  # older mcp
+    from mcp.client.streamable_http import streamablehttp_client
 from mcp.shared.exceptions import McpError
 
 LIST_PAGE_SIZE = 25
@@ -253,7 +260,7 @@ async def _connect_mcp(url: str, headers: dict | None) -> tuple[AsyncExitStack, 
         transport = await stack.enter_async_context(
             streamablehttp_client(url, headers=headers)
         )
-        read_stream, write_stream, _ = transport
+        read_stream, write_stream = transport[0], transport[1]
         session = await stack.enter_async_context(
             _AppsClientSession(read_stream, write_stream)
         )
