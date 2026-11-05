@@ -69,6 +69,92 @@ GREG_FUNCTIONS = [
 ]
 
 
+
+# Community plugins, vendored after a source read (see greg/community/README.md for source commit and review notes).
+# keep_settings: on a content change only the code is updated, so toggles David makes in the admin panel survive.
+COMMUNITY_DIR = GREG_FUNCTIONS_DIR / "community"
+
+
+def _community(id, name, type, description, is_active=True, is_global=False):
+    return {
+        "id": id,
+        "name": name,
+        "type": type,
+        "file": f"community/{id}.py",
+        "description": description,
+        "is_active": is_active,
+        "is_global": is_global,
+        "keep_settings": True,
+    }
+
+
+GREG_FUNCTIONS += [
+    _community("smart_mind_map", "Smart Mind Map", "action", "Turn a reply into an interactive mind map", is_global=True),
+    _community("infographic", "Smart Infographic", "action", "Turn a reply into an infographic", is_global=True),
+    _community("deep_dive", "Deep Dive", "action", "Structured deep dive on a reply's topic", is_global=True),
+    _community("export_word", "Export to Word", "action", "Export a reply to .docx", is_global=True),
+    _community("export_excel", "Export to Excel", "action", "Export a reply's tables to .xlsx", is_global=True),
+    _community("token_usage", "Token Usage", "filter", "Token count and cost under each reply", is_global=True),
+    _community("markdown_normalizer", "Markdown Normalizer", "filter", "Repairs broken markdown in model output"),
+    _community("clean_thinking", "Clean Thinking Tags", "filter", "Strips leaked thinking tags from replies"),
+    _community("folder_memory", "Folder Memory", "filter", "Keeps a folder's shared facts in its system prompt"),
+    _community("vision_bridge", "Vision Bridge", "filter", "Describes images for models that cannot see"),
+    _community("doodle_paint", "Doodle Paint", "filter", "Sketch-to-image canvas"),
+    # Pipes appear as models: off until configured.
+    _community("planner_v3", "Planner Agent", "pipe", "Multi-step planner agent", is_active=False),
+    _community("mopidy", "Mopidy", "pipe", "Music control for a Mopidy server", is_active=False),
+]
+
+# Tools live in their own table and need their specs computed from the module, as the admin "create tool" route does.
+GREG_TOOLS = [
+    ("inline_visualizer", "Inline Visualizer", "Interactive HTML/SVG visuals inline in chat"),
+    ("email_composer", "Email Composer", "Drafts an email card with copy and mailto"),
+    ("smart_mind_map_tool", "Smart Mind Map", "Mind maps the model can draw on its own"),
+    ("outagedeck", "OutageDeck", "Live status of public services"),
+    ("youtube", "YouTube", "Search and embed YouTube videos (needs an API key valve)"),
+    ("weather", "Weather", "OpenWeatherMap forecast widget (needs an API key valve)"),
+    ("model_3d_viewer", "3D Model Viewer", "Render 3D models inline"),
+    ("jellyfin", "Jellyfin", "Browse and play from a Jellyfin server (needs URL and key valves)"),
+]
+
+
+async def seed_tools():
+    """Register community tools in the Tool table. Idempotent; content updates keep valves and grants."""
+    from open_webui.models.tools import ToolForm, ToolMeta, Tools
+    from open_webui.models.users import Users
+    from open_webui.utils.plugin import load_tool_module_by_id
+    from open_webui.utils.tools import get_tool_specs
+
+    owner = await Users.get_super_admin_user()
+    if owner is None:
+        print("[greg-seed] Tools skipped: no admin user yet")
+        return
+
+    for tool_id, name, description in GREG_TOOLS:
+        path = COMMUNITY_DIR / f"{tool_id}.py"
+        if not path.exists():
+            print(f"[greg-seed] WARNING: community/{tool_id}.py not found, skipping")
+            continue
+        content = path.read_text(encoding="utf-8")
+        existing = await Tools.get_tool_by_id(tool_id)
+        if existing and existing.content == content:
+            continue
+        try:
+            module, frontmatter = await load_tool_module_by_id(tool_id, content=content)
+            specs = get_tool_specs(module)
+            meta = ToolMeta(description=description, manifest=frontmatter, has_user_valves=hasattr(module, "UserValves"))
+            if existing:
+                await Tools.update_tool_by_id(tool_id, {"content": content, "specs": specs, "meta": meta.model_dump()})
+                print(f"[greg-seed] Updated tool: {tool_id}")
+            else:
+                form = ToolForm(id=tool_id, name=name, content=content, meta=meta, access_grants=[])
+                await Tools.insert_new_tool(owner.id, form, specs)
+                print(f"[greg-seed] Created tool: {tool_id}")
+        except Exception as e:
+            # One broken plugin must not stop the container from starting.
+            print(f"[greg-seed] Tool {tool_id} failed to load: {e}")
+
+
 async def seed_functions():
     """Register Greg functions in Open WebUI's database. Idempotent."""
     from open_webui.internal.db import get_async_db_context
@@ -102,8 +188,9 @@ async def seed_functions():
                 # Update content if changed
                 if existing.content != content:
                     existing.content = content
-                    existing.is_active = func_def["is_active"]
-                    existing.is_global = func_def["is_global"]
+                    if not func_def.get("keep_settings"):
+                        existing.is_active = func_def["is_active"]
+                        existing.is_global = func_def["is_global"]
                     existing.updated_at = now
                     existing.meta = {
                         "description": func_def["description"],
@@ -137,5 +224,10 @@ async def seed_functions():
     print(f"[greg-seed] Done: {seeded} created, {updated} updated, {len(GREG_FUNCTIONS) - seeded - updated} unchanged")
 
 
+async def main():
+    await seed_functions()
+    await seed_tools()
+
+
 if __name__ == "__main__":
-    asyncio.run(seed_functions())
+    asyncio.run(main())
