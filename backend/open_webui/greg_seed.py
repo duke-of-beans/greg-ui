@@ -107,6 +107,7 @@ GREG_FUNCTIONS += [
 
 # Tools live in their own table and need their specs computed from the module, as the admin "create tool" route does.
 GREG_TOOLS = [
+    ("mcp_app_bridge", "MCP App Bridge", "Interactive MCP app UIs inline in chat (needs an MCP server URL valve)"),
     ("inline_visualizer", "Inline Visualizer", "Interactive HTML/SVG visuals inline in chat"),
     ("email_composer", "Email Composer", "Drafts an email card with copy and mailto"),
     ("smart_mind_map_tool", "Smart Mind Map", "Mind maps the model can draw on its own"),
@@ -140,15 +141,21 @@ async def seed_tools():
         if existing and existing.content == content:
             continue
         try:
-            module, frontmatter = await load_tool_module_by_id(tool_id, content=content)
+            # Same steps as the admin create/update tool routes (routers/tools.py): load, read specs, write with history.
+            module, frontmatter, _source = await load_tool_module_by_id(tool_id, content=content)
             specs = get_tool_specs(module)
             meta = ToolMeta(description=description, manifest=frontmatter, has_user_valves=hasattr(module, "UserValves"))
             if existing:
-                await Tools.update_tool_by_id(tool_id, {"content": content, "specs": specs, "meta": meta.model_dump()})
+                await Tools.update_tool_by_id(
+                    tool_id,
+                    {"content": content, "specs": specs, "meta": meta.model_dump(), "commit_message": "greg-seed update"},
+                    user_id=owner.id,
+                    module=module,
+                )
                 print(f"[greg-seed] Updated tool: {tool_id}")
             else:
-                form = ToolForm(id=tool_id, name=name, content=content, meta=meta, access_grants=[])
-                await Tools.insert_new_tool(owner.id, form, specs)
+                form = ToolForm(id=tool_id, name=name, content=content, meta=meta, access_grants=[], commit_message="greg-seed")
+                await Tools.insert_new_tool(owner.id, form, specs, module=module)
                 print(f"[greg-seed] Created tool: {tool_id}")
         except Exception as e:
             # One broken plugin must not stop the container from starting.

@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { resolveLocalizedResource } from '$lib/utils/localizedContent';
 	import dayjs from 'dayjs';
 	import relativeTime from 'dayjs/plugin/relativeTime';
 	import { toast } from 'svelte-sonner';
@@ -24,6 +25,8 @@
 	} from '$lib/apis/functions';
 
 	import Tooltip from '../common/Tooltip.svelte';
+	import ProfilePreview from '$lib/components/channel/Messages/Message/ProfilePreview.svelte';
+	import ProfileImage from '$lib/components/chat/Messages/ProfileImage.svelte';
 	import ConfirmDialog from '../common/ConfirmDialog.svelte';
 	import { getModels } from '$lib/apis';
 	import FunctionMenu from './Functions/FunctionMenu.svelte';
@@ -46,7 +49,7 @@
 	import ChevronDown from '../icons/ChevronDown.svelte';
 	import ChevronUp from '../icons/ChevronUp.svelte';
 
-	const i18n = getContext('i18n');
+	const i18n = getContext<typeof import('$lib/i18n').default>('i18n');
 
 	let shiftKey = false;
 
@@ -116,6 +119,9 @@
 					(selectedType !== '' ? f.type === selectedType : true) &&
 					(query === '' ||
 						f.name.toLowerCase().includes(query.toLowerCase()) ||
+						resolveLocalizedResource(f, $i18n.language)
+							.toLowerCase()
+							.includes(query.toLowerCase()) ||
 						f.id.toLowerCase().includes(query.toLowerCase()) ||
 						(f.user?.name || '').toLowerCase().includes(query.toLowerCase()) ||
 						(f.user?.email || '').toLowerCase().includes(query.toLowerCase()) ||
@@ -157,6 +163,9 @@
 			return null;
 		});
 
+		// LICENSE covers this Open WebUI Community wordmark.
+		// Do not alter, remove, obscure, or replace it except as LICENSE permits:
+		// https://docs.openwebui.com/license.
 		toast.success($i18n.t('Redirecting you to Open WebUI Community'));
 
 		const url = 'https://openwebui.com';
@@ -301,6 +310,9 @@
 </script>
 
 <svelte:head>
+	<!-- LICENSE covers this Open WebUI browser-title identifier.
+	Do not alter, remove, obscure, or replace it except as LICENSE permits:
+	https://docs.openwebui.com/license. -->
 	<title>
 		{$i18n.t('Functions')} / {$WEBUI_NAME}
 	</title>
@@ -357,7 +369,7 @@
 								},
 								{
 									id: 'functions-import-link',
-									label: $i18n.t('Import From Link'),
+									label: $i18n.t('Import from URL'),
 									onClick: () => {
 										showImportModal = true;
 									}
@@ -398,6 +410,7 @@
 						<div class="self-center pl-1.5 translate-y-[0.5px] rounded-l-xl bg-transparent">
 							<button
 								class="p-0.5 rounded-full hover:bg-gray-100 dark:hover:bg-gray-900 transition"
+								aria-label={$i18n.t('Clear search')}
 								on:click={() => {
 									query = '';
 									handleSearchInput();
@@ -488,18 +501,10 @@
 						{#each filteredItems as func (func.id)}
 							<div
 								class="group flex min-h-8 w-full cursor-pointer items-center gap-2 overflow-hidden rounded-xl px-2 py-1 text-left"
-								role="button"
-								tabindex="0"
+								role="presentation"
 								on:click={(e) => {
 									if (shouldIgnoreRowClick(e.target)) return;
 									openFunction(func);
-								}}
-								on:keydown={(e) => {
-									if (e.currentTarget !== e.target) return;
-									if (e.key === 'Enter' || e.key === ' ') {
-										e.preventDefault();
-										openFunction(func);
-									}
 								}}
 							>
 								<div class="flex min-w-0 flex-1 items-center gap-1 overflow-hidden">
@@ -507,47 +512,53 @@
 										<div class="flex min-w-0 items-center gap-2 overflow-hidden">
 											<div class="flex min-w-0 flex-1 items-center gap-2 overflow-hidden">
 												<div
-													class="shrink-0 rounded-sm bg-gray-500/20 px-1 text-[10px] uppercase leading-4 text-gray-700 dark:text-gray-200"
+													class="shrink-0 rounded-sm bg-gray-500/20 px-1 text-[0.625rem] uppercase leading-4 text-gray-700 dark:text-gray-200"
 												>
 													{func.type}
 												</div>
 
 												<Tooltip content={func.id} className="min-w-0" placement="top-start">
-													<div
-														class="truncate text-[13px] leading-5 text-gray-800 group-hover:underline dark:text-gray-200"
+													<a
+														href={`/admin/functions/edit?id=${encodeURIComponent(func.id)}`}
+														class="focus-ring block truncate rounded text-[0.8125rem] leading-5 text-gray-800 group-hover:underline focus-visible:underline dark:text-gray-200"
+														>{resolveLocalizedResource(func, $i18n.language)}</a
 													>
-														{func.name}
-													</div>
 												</Tooltip>
 
 												{#if func?.meta?.manifest?.version}
 													<div
-														class="min-w-0 max-w-[40%] shrink-0 truncate text-[11px] leading-5 text-gray-500"
+														class="min-w-0 max-w-[40%] shrink-0 truncate text-[0.6875rem] leading-5 text-gray-500"
 													>
 														v{func?.meta?.manifest?.version ?? ''}
 													</div>
 												{/if}
 
-												<Tooltip content={dayjs(func.updated_at * 1000).format('LLLL')}>
+												<Tooltip
+													content={dayjs(func.updated_at * 1000)
+														.locale($i18n.language)
+														.format('LLLL')}
+												>
 													<div
-														class="shrink-0 truncate text-[11px] leading-5 text-gray-400 dark:text-gray-600"
+														class="shrink-0 truncate text-[0.6875rem] leading-5 text-gray-400 dark:text-gray-600"
 													>
-														{dayjs(func.updated_at * 1000).fromNow()}
+														{dayjs(func.updated_at * 1000)
+															.locale($i18n.language)
+															.fromNow()}
 													</div>
 												</Tooltip>
 											</div>
 										</div>
 
-										{#if func?.meta?.description}
+										{#if resolveLocalizedResource(func, $i18n.language, 'description')}
 											<Tooltip
-												content={func?.meta?.description}
+												content={resolveLocalizedResource(func, $i18n.language, 'description')}
 												className="min-w-0"
 												placement="top-start"
 											>
 												<div
 													class="mt-0.5 truncate text-[0.6875rem] leading-4 text-gray-400 dark:text-gray-600"
 												>
-													{func?.meta?.description}
+													{resolveLocalizedResource(func, $i18n.language, 'description')}
 												</div>
 											</Tooltip>
 										{/if}
@@ -555,19 +566,23 @@
 								</div>
 
 								<div
-									class="hidden max-w-44 shrink-0 self-center truncate text-right text-[11px] leading-5 text-gray-500 dark:text-gray-500 md:block"
+									class="hidden max-w-44 shrink-0 self-center truncate text-right text-[0.6875rem] leading-5 text-gray-500 dark:text-gray-500 md:block"
 								>
-									<Tooltip
-										content={func?.user?.email ?? $i18n.t('Deleted User')}
-										className="min-w-0"
-										placement="top-start"
-									>
-										<div class="truncate">
-											{capitalizeFirstLetter(
-												func?.user?.name ?? func?.user?.email ?? $i18n.t('Deleted User')
-											)}
-										</div>
-									</Tooltip>
+									<ProfilePreview user={func?.user ?? null} side="left">
+										<span class="flex max-w-44 items-center gap-1.75">
+											<ProfileImage
+												src={func?.user?.id
+													? `/api/v1/users/${func.user.id}/profile/image`
+													: '/user.png'}
+												className="size-4 shrink-0 rounded-full!"
+											/>
+											<span class="min-w-0 max-w-24 truncate">
+												{capitalizeFirstLetter(
+													func?.user?.name ?? func?.user?.email ?? $i18n.t('Deleted User')
+												)}
+											</span>
+										</span>
+									</ProfilePreview>
 								</div>
 
 								<div class="ml-2 flex shrink-0 flex-row items-center gap-1.5 self-center">
@@ -681,9 +696,9 @@
 											</button>
 										</FunctionMenu>
 
-										<button
+										<div
 											class="flex h-6 items-center"
-											type="button"
+											role="presentation"
 											on:click={(e) => {
 												e.stopPropagation();
 												e.preventDefault();
@@ -692,6 +707,7 @@
 											<Tooltip content={func.is_active ? $i18n.t('Enabled') : $i18n.t('Disabled')}>
 												<Switch
 													bind:state={func.is_active}
+													ariaLabel={$i18n.t('Enabled')}
 													on:change={async () => {
 														toggleFunctionById(localStorage.token, func.id);
 														models.set(
@@ -706,7 +722,7 @@
 													}}
 												/>
 											</Tooltip>
-										</button>
+										</div>
 									{/if}
 								</div>
 							</div>
@@ -733,7 +749,7 @@
 
 		{#if $config?.features.enable_community_sharing}
 			<CommunityDiscover
-				href="https://openwebui.com/functions"
+				href="https://openwebui.com/search?type=function"
 				title={$i18n.t('Discover a function')}
 				description={$i18n.t('Discover, download, and explore custom functions')}
 			/>
@@ -748,7 +764,9 @@
 		}}
 	>
 		<div class=" text-sm text-gray-500 truncate">
-			{$i18n.t('This will delete')} <span class="  font-normal">{selectedFunction.name}</span>.
+			{$i18n.t('This will delete')}
+			<span class="  font-normal">{resolveLocalizedResource(selectedFunction, $i18n.language)}</span
+			>.
 		</div>
 	</DeleteConfirmDialog>
 
@@ -757,6 +775,7 @@
 		bind:show={showValvesModal}
 		type="function"
 		id={selectedFunction?.id ?? null}
+		meta={selectedFunction?.meta}
 		on:save={async () => {
 			await tick();
 			models.set(

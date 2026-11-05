@@ -20,5 +20,4 @@ Admin-panel toggles and valves survive updates (`keep_settings`); only the code 
 | planner_v3.py, mopidy.py | Haervwe/open-webui-tools@c1fac21 `functions/...` | MIT | Seeded off (pipes show up as models). Planner reads only `WEBUI_URL` from the environment. |
 | outagedeck.py, youtube.py, weather.py, model_3d_viewer.py | Haervwe/open-webui-tools@c1fac21 `tools/...` | MIT | Talk only to their service (outagedeck.com, googleapis.com, openweathermap.org). YouTube and weather need an API key valve. |
 | jellyfin.py | iChristGit/OpenWebui-Tools@af6a490 `Tools/jellyfin.py` | MIT | Talks only to the Jellyfin URL set in its valves. |
-
-Held: MCP App Bridge (classic298) needs Open WebUI 0.11.4 (`get_verified_user_by_id`); greg-ui is on 0.11.0.
+| mcp_app_bridge.py | classic298/open-webui-plugins@917c88f `mcp-app-bridge/tool.py` | BSD-3 | Talks only to the MCP server set in its valves; OAuth client info is stored encrypted in its own valves. Needs Open WebUI 0.11.4+ (added with the 0.12.5 upstream merge). |

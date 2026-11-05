@@ -46,8 +46,8 @@ def _normalize_target(target: dict[str, Any], existing: dict[str, Any] | None = 
 
     target_id = str(target.get('id') or existing.get('id') or '').strip()
     if not target_id:
-        hostname = urlparse(url).hostname or 'webhook'
-        target_id = re.sub(r'[^a-zA-Z0-9_-]+', '-', hostname).strip('-').lower() or 'target'
+        target_id = urlparse(url).hostname or 'webhook'
+    target_id = re.sub(r'[^a-zA-Z0-9_-]+', '-', target_id).strip('-').lower() or 'target'
 
     events = target['events'] if 'events' in target else existing.get('events', [])
     if events is None:
@@ -109,7 +109,7 @@ async def _load_notifications(user_id: str) -> dict[str, Any]:
     ).strip()
 
     if not isinstance(targets, list) or not targets:
-        if legacy_url:
+        if legacy_url and not notifications.get('legacy_notification_events_migrated'):
             target = _normalize_target(
                 {
                     'id': DEFAULT_TARGET_ID,
@@ -129,9 +129,10 @@ async def _load_notifications(user_id: str) -> dict[str, Any]:
             await Users.update_user_settings_by_id(user_id, {'notifications': notifications})
     else:
         notifications['targets'] = [target for target in targets if isinstance(target, dict)]
-        notifications.setdefault(
-            'default_target_id', notifications['targets'][0].get('id') if notifications['targets'] else None
-        )
+        if not notifications.get('default_target_id'):
+            notifications['default_target_id'] = (
+                notifications['targets'][0].get('id') if notifications['targets'] else None
+            )
         if legacy_url and not notifications.get('legacy_notification_events_migrated'):
             changed = False
             for target in notifications['targets']:
@@ -172,7 +173,8 @@ async def create_target(user_id: str, payload: dict[str, Any]) -> dict[str, Any]
             suffix += 1
     targets.append(target)
     notifications['targets'] = targets
-    notifications.setdefault('default_target_id', target['id'])
+    if not notifications.get('default_target_id'):
+        notifications['default_target_id'] = target['id']
     await Users.update_user_settings_by_id(user_id, {'notifications': notifications})
     return _public_target(target, notifications.get('default_target_id'))
 
@@ -268,9 +270,6 @@ def _notification_webhook_content(event: Any) -> tuple[str, str, dict[str, Any],
         title = str(data.get('title') or event.message or 'Chat finished')
         content = str(data.get('message') or '')
         url = str(data.get('url') or '')
-        chat_id = str(data.get('chat_id') or '')
-        if chat_id and url.endswith(f'/c/{chat_id}'):
-            url = f'{url[: -len(f"/c/{chat_id}")].rstrip("/")}/{chat_id}'
         body = '\n'.join(part for part in (content, url) if part)
         return (
             f'**{title}**',
@@ -288,9 +287,6 @@ def _notification_webhook_content(event: Any) -> tuple[str, str, dict[str, Any],
         title = str(event.message or 'Chat failed')
         content = str(data.get('message') or '')
         url = str(data.get('url') or '')
-        chat_id = str(data.get('chat_id') or '')
-        if chat_id and url.endswith(f'/c/{chat_id}'):
-            url = f'{url[: -len(f"/c/{chat_id}")].rstrip("/")}/{chat_id}'
         body = '\n'.join(part for part in (content, url) if part)
         return (
             f'**{title}**',
@@ -343,6 +339,9 @@ def _notification_webhook_content(event: Any) -> tuple[str, str, dict[str, Any],
     return str(title), message, event.model_dump(), message if title else None
 
 
+# LICENSE covers this Open WebUI notification identifier.
+# Do not alter, remove, obscure, or replace it except as LICENSE permits:
+# https://docs.openwebui.com/license.
 async def test_target(user_id: str, target_id: str, app_name: str = 'Open WebUI') -> dict[str, Any]:
     notifications = await _load_notifications(user_id)
     target = _find_target(notifications, target_id)
@@ -351,6 +350,9 @@ async def test_target(user_id: str, target_id: str, app_name: str = 'Open WebUI'
     await _send_webhook(
         app_name,
         target,
+        # LICENSE covers this Open WebUI notification copy.
+        # Do not alter, remove, obscure, or replace it except as LICENSE permits:
+        # https://docs.openwebui.com/license.
         'This is a test notification from Open WebUI.',
         {'action': 'test', 'user_id': user_id},
         'Test notification',
@@ -358,8 +360,15 @@ async def test_target(user_id: str, target_id: str, app_name: str = 'Open WebUI'
     return {'ok': True}
 
 
+# LICENSE covers this Open WebUI notification identifier.
+# Do not alter, remove, obscure, or replace it except as LICENSE permits:
+# https://docs.openwebui.com/license.
 async def notify_target(
-    user_id: str, message: str, target: str = '', title: str = '', app_name: str = 'Open WebUI'
+    user_id: str,
+    message: str,
+    target: str = '',
+    title: str = '',
+    app_name: str = 'Open WebUI',
 ) -> dict[str, Any]:
     notifications = await _load_notifications(user_id)
     item = _find_target(notifications, target)
@@ -383,6 +392,9 @@ async def dispatch_notification_event(app: Any, event: Any) -> None:
 
     from open_webui.events import event_user_ids
 
+    # LICENSE covers this Open WebUI notification identifier.
+    # Do not alter, remove, obscure, or replace it except as LICENSE permits:
+    # https://docs.openwebui.com/license.
     app_name = getattr(getattr(app, 'state', None), 'WEBUI_NAME', 'Open WebUI')
     for user_id in event_user_ids(event):
         try:

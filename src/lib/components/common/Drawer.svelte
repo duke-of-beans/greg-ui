@@ -2,18 +2,30 @@
 	import { onDestroy, onMount } from 'svelte';
 	import { flyAndScale } from '$lib/utils/transitions';
 	import { fade, fly, slide } from 'svelte/transition';
+	import { settings } from '$lib/stores';
+	import { matchKeybinding, Shortcut } from '$lib/shortcuts';
 
 	export let show = false;
 	export let className = '';
+	export let zIndexClass = 'z-999';
+	export let panelStyle = '';
+	export let backdropStyle = '';
+	export let swipeSide: 'left' | 'right' | undefined = undefined;
 	export let onClose = () => {};
+	export let onRequestClose: (() => void) | null = null;
+	const requestClose = () => (onRequestClose ? onRequestClose() : (show = false));
 
 	let modalElement = null;
 	let mounted = false;
 
 	const handleKeyDown = (event: KeyboardEvent) => {
-		if (event.key === 'Escape' && isTopModal()) {
-			console.log('Escape');
-			show = false;
+		if (
+			(event.key === 'Escape' ||
+				($settings?.keyboardShortcuts !== false &&
+					matchKeybinding(event) === Shortcut.CLOSE_MODAL)) &&
+			isTopModal()
+		) {
+			requestClose();
 		}
 	};
 
@@ -57,14 +69,21 @@
 {#if show}
 	<div
 		bind:this={modalElement}
-		class="modal fixed right-0 bottom-0 left-0 z-999 flex h-screen max-h-[100dvh] w-full justify-center overflow-hidden overscroll-contain bg-black/60"
-		in:fly={{ y: 100, duration: 100 }}
-		on:mousedown={() => {
-			show = false;
-		}}
+		data-swipe-panel={swipeSide}
+		class="modal fixed right-0 bottom-0 left-0 {zIndexClass} flex h-screen max-h-[100dvh] w-full justify-center overflow-hidden overscroll-contain {swipeSide
+			? ''
+			: 'bg-black/60'}"
+		in:fly={{ y: swipeSide ? 0 : 100, duration: swipeSide ? 0 : 100 }}
+		on:mousedown={requestClose}
 	>
+		{#if swipeSide}
+			<div class="absolute inset-0 bg-black" style={backdropStyle}></div>
+		{/if}
 		<div
-			class=" mt-auto w-full bg-gray-50 dark:bg-gray-900 dark:text-gray-100 {className} scrollbar-hidden max-h-[100dvh] overflow-y-auto"
+			class="{swipeSide
+				? 'relative'
+				: ''} mt-auto w-full bg-gray-50 dark:bg-gray-900 dark:text-gray-100 {className} scrollbar-hidden max-h-[100dvh] overflow-y-auto"
+			style={panelStyle}
 			on:mousedown={(e) => {
 				e.stopPropagation();
 			}}
